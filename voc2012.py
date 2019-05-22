@@ -58,7 +58,13 @@ class XmlDictConfig(dict):
                 # if the tag has attributes, add those to the dict
                 if element.items():
                     aDict.update(dict(element.items()))
-                self.update({element.tag: aDict})
+                if element.tag in self:
+                    if type(self[element.tag]) is not list:
+                        self[element.tag] = [self[element.tag], aDict]
+                    else:
+                        self[element.tag].append(aDict)
+                else:
+                    self.update({element.tag: aDict})
             # this assumes that if you've got an attribute in a tag,
             # you won't be having any text. This may or may not be a
             # good idea -- time will tell. It works for the way we are
@@ -96,25 +102,51 @@ class VOC:
         item = int(item)
         img = np.array(Image.open(self.images[item]))
         assert img.shape.__len__() == 3
-        anno = XmlDictConfig(ElementTree.parse(self.annotations[item]).getroot())
-        anno = anno.object.bndbox
-        cx = (anno.xmax + anno.xmin) // 2
-        cy = (anno.ymax + anno.ymin) // 2
-        width = anno.xmax - anno.xmin
-        height = anno.ymax - anno.ymin
-
-        return img, (cx, cy, width, height)
+        annos = XmlDictConfig(ElementTree.parse(self.annotations[item]).getroot())
+        annos = annos.object
+        if type(annos) is not list:
+            annos = [annos]
+        bbox = []
+        for anno in annos:
+            cx = (int(anno.bndbox.xmax) + int(anno.bndbox.xmin)) // 2
+            cy = (int(anno.bndbox.ymax) + int(anno.bndbox.ymin)) // 2
+            height = int(anno.bndbox.xmax) - int(anno.bndbox.xmin)
+            width = int(anno.bndbox.ymax) - int(anno.bndbox.ymin)
+            bbox.append((cy, cx, width, height, anno.name))
+        return img, bbox
 
     def __len__(self):
         return len(self.images)
 
 
 if __name__ == '__main__':
+    import matplotlib.pyplot as plt
+    from util.npdraw import draw_bounding_box
     voc = VOC('val')
     for i in voc.images:
         assert os.path.exists(i), f'{i} not exist!'
     for i in voc.annotations:
         assert os.path.exists(i), f'{i} not exist!'
 
-    for img, anno in tqdm(voc):
-        print(anno)
+    img,anno = voc[445]
+    plt.figure()
+    plt.imshow(img)
+    bbimg = img
+    timg = img.copy()
+    for _, annos in voc:
+        for i in annos:
+            print(i)
+    for i in anno:
+        bbimg = draw_bounding_box(bbimg, *i[:4])
+    for i in anno:
+        crow,ccol,lrow,lcol,label = i
+        timg[
+            (crow-lrow//2) : (crow + lrow //2),
+            (ccol-lcol//2) : (ccol + lcol //2),
+            1
+        ]=1
+    plt.figure()
+    plt.imshow(bbimg)
+    plt.figure()
+    plt.imshow(timg)
+    plt.show()
