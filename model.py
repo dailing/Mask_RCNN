@@ -1,10 +1,19 @@
-import torch.nn as nn
-import numpy as np
 import math
-from voc2012 import VOC
-from torch.utils.data import Dataset, DataLoader
-import torch
 from itertools import product
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional
+from torch.optim import SGD
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+from util.logs import get_logger
+from voc2012 import VOC
+from tensorboardX import SummaryWriter
+
+logger = get_logger('fuck me')
 
 
 class VGG(nn.Module):
@@ -112,85 +121,220 @@ class BBloader(Dataset):
         self.ratio = 32
 
     def __getitem__(self, index):
-        img, bbox = self.data[index]
-        img = img.astype(np.float)
-        img = img.transpose((2, 0, 1)) / 255
-        img = img.astype(np.float32)
-        nchannel, nrow, ncol = img.shape
+        image, bbox = self.data[index]
+        image = image.astype(np.float)
+        image = image.transpose((2, 0, 1)) / 255
+        image = image.astype(np.float32)
+        nchannel, nrow, ncol = image.shape
 
         arow, acol = nrow // self.ratio, ncol // self.ratio
-        archor_cls = np.zeros((self.n_archer, 2, arow, acol), np.float)
-        archor_reg = np.zeros((self.n_archer, 4, arow, acol), np.float)
-        train_mask = np.zeros((self.n_archer, 1, arow, acol), np.float)
+        archor_reg = np.zeros((self.n_archer, 4, arow, acol), np.float32)
+        iou_map = np.zeros((self.n_archer, 1, arow, acol), np.float)
+        arc_to_bbox_map = np.zeros((self.n_archer, 1, arow, acol), np.int) - 1
 
         center_rows = [self.ratio // 2 + i * self.ratio for i in range(arow)]
         center_cols = [self.ratio // 2 + i * self.ratio for i in range(acol)]
 
         for irow, icol, iarc in product(range(arow), range(acol), range(self.n_archer)):
-            # print(irow, icol, iarc)
             abox = (
-                self.ratio // 2 + self.ratio * irow,
-                self.ratio // 2 + self.ratio * icol,
+                center_rows[irow],
+                center_cols[icol],
                 *self.archers[iarc]
             )
-            train_mask[iarc, 0, irow, icol] = max((mean_iou(abox, label_box) for label_box in bbox))
-        print('fff', np.sum(train_mask > 0.5))
-        print('fff', img.shape)
+            iou_on_each_bbox = np.array([mean_iou(abox, label_box) for label_box in bbox])
+            iou_map[iarc, 0, irow, icol] = np.max(iou_on_each_bbox)
+            if iou_map[iarc, 0, irow, icol] > 0.5:
+                arc_to_bbox_map[iarc, 0, irow, icol] = np.argmax(iou_on_each_bbox)
+        positive = iou_map > 0.5
+        negative = iou_map < 0.3
+        n_postive = np.sum(positive)
+        negative_points = np.where(negative)
+        indices = np.random.choice(
+            np.arange(negative_points[0].size),
+            replace=False,
+            size=max(0, negative_points[0].size - n_postive)
+        )
+        sss = tuple((i[indices] for i in negative_points))
+        negative[sss] = 0
+        train_mask = positive | negative
 
-        return img, (archor_cls, archor_reg, train_mask)
+        # logger.info(n_postive, np.sum(negative), np.sum(train_mask))
+        # logger.info(positive.shape)
+
+        archor_cls = np.concatenate((negative.astype(np.int), positive.astype(np.int)), axis=1)
+
+        for irow, icol, iarc in product(range(arow), range(acol), range(self.n_archer)):
+            if not train_mask[iarc, 0, irow, icol]:
+                continue
+            current_bbox = bbox[arc_to_bbox_map[iarc, 0, irow, icol]]
+            t_row = (current_bbox[0] - center_rows[irow]) / self.archers[iarc][0]
+            t_col = (current_bbox[1] - center_cols[icol]) / self.archers[iarc][1]
+            t_row_len = math.log(current_bbox[2] / self.archers[iarc][0])
+            t_col_len = math.log(current_bbox[3] / self.archers[iarc][1])
+            archor_reg[iarc, :, irow, icol] = (t_row, t_col, t_row_len, t_col_len)
+        # logger.info(archor_cls.shape)
+
+        archor_cls = archor_cls.astype(np.float32)
+        train_mask = train_mask.astype(np.float32)
+        return image, (archor_cls, archor_reg, train_mask)
 
     def __len__(self):
         return self.data.__len__()
 
 
-class mrcnn:
+def restore_box_reg(t_row, t_col, t_lrow, t_lcol, arow, acol, a_lrow, a_lcol):
+    row = t_row * a_lrow + arow
+    col = t_col * a_lcol + acol
+    lrow = math.exp(t_lrow) * a_lrow
+    lcol = math.exp(t_lcol) * a_lcol
+    return row, col, lrow, lcol
+
+
+class Mrcnn:
     def __init__(self):
         self.device = torch.device('cuda')
         self.net = VGG()
         self.net.to(self.device)
         self.epoach = 0
-        self.train_loader = DataLoader(
-            BBloader('train', 'voc'),
-            1,
-            True
+        self.train_data = BBloader('train', 'voc')
+        self.train_loader = DataLoader(self.train_data, 1, True, num_workers=1)
+        self.optm = SGD(
+            self.net.parameters(),
+            lr=0.003,
+            momentum=0.9,
+            nesterov=True,
+            weight_decay=0.00005
         )
+        self.logWriter = SummaryWriter(logdir=f'log/fuck')
 
-    # def train(self):
-    #     for img, ()
+    def train(self):
+        self.net.train()
+        tt = tqdm(self.train_loader, total=len(self.train_loader))
+        for idx, (img, (cls, reg, mask)) in enumerate(tt):
+            if mask.sum().cpu() == 0:
+                continue
+            img = img.to(self.device)
+            cls = cls.to(self.device)
+            reg = reg.to(self.device)
+            mask = mask.to(self.device)
+
+            pcls, preg = self.net(img)
+
+            # Calculate Loss_cls
+            pcls = pcls.reshape(cls.shape)
+            pcls = torch.nn.functional.log_softmax(pcls, dim=2)
+            pcls = pcls * cls
+            pcls = pcls * mask
+            L_cls = - pcls.sum() / mask.sum()
+
+            # Calculate Loss_reg
+            preg = preg.reshape(reg.shape)
+            L_reg = torch.abs(preg - reg)
+            L_reg = torch.where(L_reg < 1, 0.5 * L_reg ** 2, L_reg - 0.5)
+            positive = cls[:, :, 1:, :, :]
+            L_reg = L_reg * positive
+            L_reg = L_reg.sum() / positive.sum()
+
+            self.optm.zero_grad()
+            loss = L_cls + 0.5 * L_reg
+            loss.backward()
+            self.optm.step()
+
+            loss = loss.detach().cpu()
+            tt.set_postfix_str(str(loss))
+            self.logWriter.add_scalar(
+                'train/loss',
+                float(loss),
+                (self.epoach - 1) * len(self.train_loader) + idx)
+
+
+    def step(self, n=300):
+        for i in range(n):
+            self.epoach += 1
+            self.train()
+            torch.save(self.net.state_dict(), f'runs/model_{self.epoach:04}.model')
 
 
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
+    import sys
+
+    traner = Mrcnn()
+    traner.step()
+
+    sys.exit(0)
 
     n = VGG()
-    loader = DataLoader(BBloader('train', 'voc'), batch_size=1, shuffle=True)
+    dataset = BBloader('train', 'voc')
+    loader = DataLoader(dataset, batch_size=1, shuffle=True)
 
-    for img, label in loader:
-        print(img.dtype)
-        rr = n(img)
-        print(img.shape)
-        print(rr[0].shape)
-        print(rr[1].shape)
-        print(label[0].shape)
-        print(label[1].shape)
+    for img, (cls, reg, mask) in loader:
+        logger.info(img.dtype)
+        pcls, preg = n(img)
+        img = img.detach().numpy()[0, :, :, :]
+        img = img.transpose(1, 2, 0)
+        logger.info(img.shape)
+        plt.figure()
+        plt.imshow(img)
+        # plt.show()
+
+        mask = mask.detach().numpy()
+        mask = mask[0, ::]
+        cls = cls.detach().numpy()
+        cls = cls[0, ::]
+        # cls = cls.reshape(9, 2, *cls.shape[2:])
+        reg = reg.detach().numpy()
+        reg = reg[0, ::]
+        # reg = reg.reshape(9, 4, *reg.shape[2:])
+        logger.info(cls.shape)
+        logger.info(reg.shape)
+        logger.info(mask.shape)
+        logger.info(np.sum(mask))
+        logger.info(np.sum(cls[:, 1, :, :]))
+        for irow, icol, iarch in product(range(mask.shape[2]), range(mask.shape[3]), range(mask.shape[0])):
+            # if mask[iarch, 0, irow, icol] == 0:
+            #     continue
+            if cls[iarch, 1, irow, icol] == 0:
+                continue
+            rr = restore_box_reg(
+                *reg[iarch, :, irow, icol].tolist(),
+                dataset.ratio // 2 + dataset.ratio * irow,
+                dataset.ratio // 2 + dataset.ratio * icol,
+                *dataset.archers[iarch],
+            )
+            logger.info('drawing bounding box')
+            img = draw_bounding_box(
+                img,
+                dataset.ratio // 2 + dataset.ratio * irow,
+                dataset.ratio // 2 + dataset.ratio * icol,
+                *dataset.archers[iarch],
+                color=(0, 1, 0, 0.4)
+            )
+            img = draw_bounding_box(
+                img,
+                *rr,
+                color=(1, 0, 0, 1)
+            )
+        plt.figure()
+        plt.imshow(img)
+        plt.show()
         break
-    print(mean_iou(
+    logger.info(mean_iou(
         (1000, 1000, 100, 100),
         (1000, 1000, 100, 100)
     ) - 1)
-    print(mean_iou(
+    logger.info(mean_iou(
         (1010, 1010, 100, 100),
         (1000, 1000, 100, 100)
     ) - 0.81 / 1.19)
-    print(mean_iou(
+    logger.info(mean_iou(
         (1010, 1000, 100, 100),
         (1000, 1000, 100, 100)
     ) - 0.9 / 1.1)
-    print(mean_iou(
+    logger.info(mean_iou(
         (1010, 1010, 10, 10),
         (1000, 1000, 100, 100)
     ) - 0.01)
-    print(mean_iou(
+    logger.info(mean_iou(
         (2010, 1010, 10, 10),
         (1000, 1000, 100, 100)
     ) - 0)
