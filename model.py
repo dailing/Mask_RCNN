@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional
+import matplotlib.pyplot as plt
 from torch.optim import SGD
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
@@ -12,6 +13,7 @@ from tqdm import tqdm
 from util.logs import get_logger
 from voc2012 import VOC
 from tensorboardX import SummaryWriter
+from util.npdraw import draw_bounding_box
 
 logger = get_logger('fuck me')
 
@@ -191,13 +193,37 @@ def restore_box_reg(t_row, t_col, t_lrow, t_lcol, arow, acol, a_lrow, a_lcol):
 
 
 class Mrcnn:
-    def __init__(self):
-        self.device = torch.device('cuda')
-        self.net = VGG()
+    def __init__(
+            self,
+            device=None,
+            model=None,
+            train_data=None,
+            test_data=None,
+            net=None):
+        if device is None:
+            device = 'cuda'
+        self.device = torch.device(device)
+        if self.net is None:
+            self.net = VGG()
+        else:
+            self.net = net
+        if model is not None:
+            logger.info(f'loading form {model}')
+            dd = torch.load(model)
+            self.net.load_state_dict(dd)
         self.net.to(self.device)
         self.epoach = 0
-        self.train_data = BBloader('train', 'voc')
-        self.train_loader = DataLoader(self.train_data, 1, True, num_workers=1)
+        if train_data is None:
+            self.train_data = BBloader('train', 'voc')
+        else:
+            self.train_data = train_data
+        if test_data is None:
+            self.test_data = BBloader('train', 'voc')
+        else:
+            self.test_data = test_data
+
+        self.train_loader = DataLoader(self.train_data, 1, True, num_workers=2)
+        self.test_loader = DataLoader(self.test_data, 1, True, num_workers=2)
         self.optm = SGD(
             self.net.parameters(),
             lr=0.003,
@@ -247,6 +273,44 @@ class Mrcnn:
                 float(loss),
                 (self.epoach - 1) * len(self.train_loader) + idx)
 
+    def test(self):
+        tt = tqdm(self.test_loader, total=len(self.test_loader))
+        for idx, (img, (cls, reg, mask)) in enumerate(tt):
+            img = img.to(self.device)
+            real_img = img.detach().numpy()
+            real_img = real_img[0, :, :, :].transpose(1, 2, 0)
+            pcls, preg = self.net(img)
+
+            pcls = cls.detach().numpy()
+            pcls = pcls.reshape(self.test_data.n_archer, 2, *pcls.shape[-2:])
+            preg = preg.detach().numpy()
+            preg = preg.reshape(self.test_data.n_archer, 4, *preg.shape[-2:])
+            for iarch, irow, icol in product(
+                    range(pcls.shape[0]),
+                    range(pcls.shape[2]),
+                    range(pcls.shape[3])):
+                if pcls[iarch, 1, irow, icol] > pcls[iarch, 0, irow, icol]:
+                    regresult = restore_box_reg(
+                        *preg[iarch, :, irow, icol].tolist(),
+                        self.test_data.ratio // 2 + irow * self.test_data.ratio,
+                        self.test_data.ratio // 2 + icol * self.test_data.ratio,
+                        *self.test_data.archers[iarch],
+                    )
+                    logger.info(f'draw bounding box {iarch} {irow}, {icol}')
+                    real_img = draw_bounding_box(real_img, *regresult,
+                                                 (0, 1, 0, 0.5),
+                                                 bg_color=(1, 0, 0, 0.02))
+                    # real_img = draw_bounding_box(real_img, 
+                    #     self.test_data.ratio // 2 + irow * self.test_data.ratio,
+                    #     self.test_data.ratio // 2 + icol * self.test_data.ratio,
+                    #     *self.test_data.archers[iarch]
+                    # )
+
+            logger.info(pcls.shape)
+
+            plt.figure()
+            plt.imshow(real_img)
+            plt.show()
 
     def step(self, n=300):
         for i in range(n):
@@ -257,6 +321,10 @@ class Mrcnn:
 
 if __name__ == '__main__':
     import sys
+    from fire import Fire
+
+    Fire(Mrcnn)
+    sys.exit(0)
 
     traner = Mrcnn()
     traner.step()
