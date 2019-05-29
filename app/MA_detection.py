@@ -1,24 +1,23 @@
+import math
 import os
 import pickle
+import sys
 from itertools import product
+from os.path import join as pjoin, exists
+
+import numpy as np
 import pandas as pd
-import torch
+import torch.nn as nn
 from PIL import Image
 from torch.utils.data import Dataset
-import numpy as np
-from model import Mrcnn, mean_iou
-import torch.nn as nn
-import math
-from os.path import join as pjoin, exists
-import sys
 
+from augment import FundusAOICrop, CompostImageAndLabel
+from model import mean_iou
 from util.files import assert_exist, check_exist
-from voc2012 import VOC
-from augment import FundusAOICrop, Resize, ToFloat, RandFlip, RandRotate, \
-    RandomNoise, ToTensor, CompostImageAndLabel, ToNumpyType
-
 from util.logs import get_logger
-from collections import namedtuple
+from util.npdraw import draw_bounding_box
+from util.segmentation2bbox import segmentation2bbox
+from model import restore_box_reg
 
 logger = get_logger('ma detection')
 
@@ -30,7 +29,7 @@ class VGG(nn.Module):
             [64, 64, 'M',  # 3, 5, 6
              128, 128, 'M',  # 10, 14 16
              256, 256, 512, 'M',  # 24, 32, 40, 44
-             # 512, 512, 512, 'M',  # 60, 76, 92, 100
+             512, 512, 512, 'M',  # 60, 76, 92, 100
              # 512, 512, 512, 'M',
              ],  # 132, 164, 196, 212
             batch_norm=True)
@@ -91,27 +90,10 @@ class VGG(nn.Module):
 class ChallengeDB:
     def __init__(self,
                  root='/home/d/data/challenge/A. Segmentation/',
-                 split=None,
-                 augment_transform=False,
-                 repeat=1):
+                 split=None):
         self.split = split
         self.transform = [
             FundusAOICrop(),
-            # Resize(1200),
-            (ToFloat(), None),
-        ]
-        if augment_transform == True:
-            self.transform += [
-                (RandomNoise(), None),
-                RandFlip(),
-                RandRotate(),
-            ]
-        elif augment_transform == False:
-            pass
-        elif augment_transform is not None:
-            self.transform += augment_transform
-        self.transform += [
-            (ToTensor(), ToNumpyType(np.int)),
         ]
         if split == 'train':
             self.dataFiles = tuple(
@@ -147,10 +129,7 @@ class ChallengeDB:
             )
         else:
             raise Exception(f'split ({split}) not recognized!')
-        cacheStep = 2
-        self.cacheTransform = CompostImageAndLabel(self.transform[:cacheStep])
-        self.transform = CompostImageAndLabel(self.transform[cacheStep:])
-        self.repeat = repeat
+        self.cacheTransform = CompostImageAndLabel(self.transform)
         self.cacheDir = 'runs/cache/'
 
     def _getCacheItem(self, index):
@@ -177,11 +156,10 @@ class ChallengeDB:
 
     def __getitem__(self, index):
         logger.debug(f'getting {index}')
-        if index >= len(self.dataFiles) * self.repeat:
+        if index >= len(self.dataFiles):
             raise IndexError()
         index = index % len(self.dataFiles)
         images = self._getCacheItem(index)
-        images = self.transform(*images)
         image = images[0]
         xx = (np.zeros(images[1].shape, images[1].dtype), *images[1:])
         labels = np.array(xx)
@@ -189,25 +167,26 @@ class ChallengeDB:
         return image, labels
 
     def __len__(self):
-        return len(self.dataFiles) * self.repeat
+        return len(self.dataFiles)
 
 
 def slide_image(img, size, overlap=0.2):
     image_patch = []
     top_left_points = []
-    stride = (1-overlap)*size
+    stride = (1 - overlap) * size
+
     def calculate_start_p(stride, size):
-        num_step = math.ceil(size/stride)
+        num_step = math.ceil(size / stride)
         stride = size / num_step
-        for i in range(num_step+1):
-            yield math.floor(stride*i)
+        for i in range(num_step + 1):
+            yield math.floor(stride * i)
 
     for row, col in product(
-            calculate_start_p(stride, img.shape[-2] - size),
-            calculate_start_p(stride, img.shape[-1] - size)):
-        row = min(img.shape[-2] - size, row)
-        col = min(img.shape[-1] - size, col)
-        image_patch.append(img[::, row:row + size, col:col + size])
+            calculate_start_p(stride, img.shape[0] - size),
+            calculate_start_p(stride, img.shape[1] - size)):
+        row = min(img.shape[0] - size, row)
+        col = min(img.shape[1] - size, col)
+        image_patch.append(img[row:row + size, col:col + size, ::])
         top_left_points.append((row, col))
     return image_patch, top_left_points
 
@@ -217,11 +196,26 @@ class BBloader(Dataset):
         self.split = split
         if archers is None:
             archers = [
-                (5, 5),
+                (7, 7),
+                (15, 15),
+                (30, 30),
+                (30, 60),
+                (60, 30),
+                (60, 60),
+                (120, 60),
+                (60, 120),
+                (120, 120),
+                (240, 120),
+                (120, 240),
+                (240, 240),
+                (480, 240),
+                (240, 480),
+                (480, 480),
             ]
         self.n_archer = len(archers)
         self.archers = archers
-        self.ratio = 32
+        self.ratio = 16
+        self.file_list = self._make_slices()
 
     def _make_slices(self):
         store_dir = f'runs/fundus_image_data/{self.split}'
@@ -230,7 +224,6 @@ class BBloader(Dataset):
         stride = 400
         if exists(csv_file):
             dd = pd.read_csv(csv_file)
-            logger.info(dd.head())
             return dd
         if not exists(store_dir):
             os.makedirs(store_dir, exist_ok=True)
@@ -246,8 +239,17 @@ class BBloader(Dataset):
                 gtp = gt[
                       c[0]:c[0] + image_size,
                       c[1]:c[1] + image_size]
+                all_bbox = []
+                for lesionType in range(4):
+                    bbox = segmentation2bbox(gtp == lesionType + 1)
+                    bbox = list(map(
+                        lambda x: (*x, lesionType),
+                        bbox
+                    ))
+                    logger.info(bbox)
+                    all_bbox += bbox
                 pickle.dump(
-                    (p, gtp, c),
+                    (p, all_bbox),
                     open(record_name, 'wb'))
                 records.append(dict(
                     file=record_name
@@ -255,11 +257,12 @@ class BBloader(Dataset):
             break
         data_csv = pd.DataFrame.from_records(records)
         data_csv.to_csv(csv_file, index=False)
-        logger.info(data_csv.head())
-
+        return data_csv
 
     def __getitem__(self, index):
-        image, bbox = self.data[index]
+        if index >= self.__len__():
+            raise IndexError()
+        image, bbox = pickle.load(open(self.file_list.file[index], 'rb'))
         image = image.astype(np.float)
         image = image.transpose((2, 0, 1)) / 255
         image = image.astype(np.float32)
@@ -267,24 +270,32 @@ class BBloader(Dataset):
 
         arow, acol = nrow // self.ratio, ncol // self.ratio
         archor_reg = np.zeros((self.n_archer, 4, arow, acol), np.float32)
-        iou_map = np.zeros((self.n_archer, 1, arow, acol), np.float)
+        positive = np.zeros((self.n_archer, 1, arow, acol), np.int)
+        negative = np.zeros((self.n_archer, 1, arow, acol), np.int)
         arc_to_bbox_map = np.zeros((self.n_archer, 1, arow, acol), np.int) - 1
 
         center_rows = [self.ratio // 2 + i * self.ratio for i in range(arow)]
         center_cols = [self.ratio // 2 + i * self.ratio for i in range(acol)]
 
-        for irow, icol, iarc in product(range(arow), range(acol), range(self.n_archer)):
-            abox = (
-                center_rows[irow],
-                center_cols[icol],
-                *self.archers[iarc]
-            )
-            iou_on_each_bbox = np.array([mean_iou(abox, label_box) for label_box in bbox])
-            iou_map[iarc, 0, irow, icol] = np.max(iou_on_each_bbox)
-            if iou_map[iarc, 0, irow, icol] > 0.5:
-                arc_to_bbox_map[iarc, 0, irow, icol] = np.argmax(iou_on_each_bbox)
-        positive = iou_map > 0.01
-        negative = iou_map < 0.01
+        for bbox_idx, label_box in enumerate(bbox):
+            iou_map = np.zeros((self.n_archer, 1, arow, acol), np.float)
+            for irow, icol, iarc in product(range(arow), range(acol), range(self.n_archer)):
+                abox = (
+                    center_rows[irow],
+                    center_cols[icol],
+                    *self.archers[iarc]
+                )
+                iou_map[iarc, 0, irow, icol] = mean_iou(abox, label_box)
+            if np.all(iou_map < 0.5):
+                h_thresh = np.max(iou_map)
+                l_thresh = 0.5 * h_thresh
+            else:
+                h_thresh = 0.5
+                l_thresh = 0.3
+            positive += iou_map >= h_thresh
+            negative += iou_map < l_thresh
+            arc_to_bbox_map[iou_map >= h_thresh] = bbox_idx
+
         n_postive = np.sum(positive)
         negative_points = np.where(negative)
         indices = np.random.choice(
@@ -310,27 +321,43 @@ class BBloader(Dataset):
         return image, (archor_cls, archor_reg, train_mask)
 
     def __len__(self):
-        return self.data.__len__()
+        return self.file_list.__len__()
 
 
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-
     dd = BBloader(split='train')
-    dd._make_slices()
+    for img, (cls, reg, mask) in dd:
+        pcls = cls
+        preg = reg
+        real_img = img.transpose(1, 2, 0).copy()
+        for iarch, irow, icol in product(
+                range(pcls.shape[0]),
+                range(pcls.shape[2]),
+                range(pcls.shape[3])):
+            if pcls[iarch, 1, irow, icol] > pcls[iarch, 0, irow, icol]:
+                regresult = restore_box_reg(
+                    *preg[iarch, :, irow, icol].tolist(),
+                    dd.ratio // 2 + irow * dd.ratio,
+                    dd.ratio // 2 + icol * dd.ratio,
+                    *dd.archers[iarch],
+                )
+                real_img = draw_bounding_box(
+                    real_img, *regresult,
+                    (0, 1, 0, 1),
+                    bg_color=(1, 0, 0, 0.00))
     sys.exit(0)
 
-    dev = torch.device('cpu')
-    ddata = ChallengeDB(split='train')
-    net = VGG()
-    net = net.to(dev)
-    image, label = ddata[23]
-    plt.figure()
-    out = net(torch.Tensor(image[np.newaxis, ::]).to(dev))
-    print(out)
-    image = image.transpose(1, 2, 0)
-    logger.info(image.shape)
-    plt.imshow(image)
-    plt.figure()
-    plt.imshow(label == 5)
-    plt.show()
+    # dev = torch.device('cpu')
+    # ddata = ChallengeDB(split='train')
+    # net = VGG()
+    # net = net.to(dev)
+    # image, label = ddata[23]
+    # plt.figure()
+    # out = net(torch.Tensor(image[np.newaxis, ::]).to(dev))
+    # print(out)
+    # image = image.transpose(1, 2, 0)
+    # logger.info(image.shape)
+    # plt.imshow(image)
+    # plt.figure()
+    # plt.imshow(label == 5)
+    # plt.show()
