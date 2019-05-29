@@ -254,7 +254,6 @@ class BBloader(Dataset):
                 records.append(dict(
                     file=record_name
                 ))
-            break
         data_csv = pd.DataFrame.from_records(records)
         data_csv.to_csv(csv_file, index=False)
         return data_csv
