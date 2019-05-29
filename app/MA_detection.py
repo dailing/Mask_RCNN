@@ -1,8 +1,7 @@
 import os
 import pickle
-import shutil
 from itertools import product
-
+import pandas as pd
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
@@ -11,6 +10,7 @@ from model import Mrcnn, mean_iou
 import torch.nn as nn
 import math
 from os.path import join as pjoin, exists
+import sys
 
 from util.files import assert_exist, check_exist
 from voc2012 import VOC
@@ -192,19 +192,71 @@ class ChallengeDB:
         return len(self.dataFiles) * self.repeat
 
 
+def slide_image(img, size, overlap=0.2):
+    image_patch = []
+    top_left_points = []
+    stride = (1-overlap)*size
+    def calculate_start_p(stride, size):
+        num_step = math.ceil(size/stride)
+        stride = size / num_step
+        for i in range(num_step+1):
+            yield math.floor(stride*i)
+
+    for row, col in product(
+            calculate_start_p(stride, img.shape[-2] - size),
+            calculate_start_p(stride, img.shape[-1] - size)):
+        row = min(img.shape[-2] - size, row)
+        col = min(img.shape[-1] - size, col)
+        image_patch.append(img[::, row:row + size, col:col + size])
+        top_left_points.append((row, col))
+    return image_patch, top_left_points
+
+
 class BBloader(Dataset):
-    def __init__(self, split, name, archers=None):
+    def __init__(self, split, archers=None):
         self.split = split
-        self.name = name
         if archers is None:
             archers = [
                 (5, 5),
             ]
         self.n_archer = len(archers)
         self.archers = archers
-        if name == 'voc':
-            self.data = VOC(split=split)
         self.ratio = 32
+
+    def _make_slices(self):
+        store_dir = f'runs/fundus_image_data/{self.split}'
+        csv_file = pjoin(store_dir, f'list.csv')
+        image_size = 512
+        stride = 400
+        if exists(csv_file):
+            dd = pd.read_csv(csv_file)
+            logger.info(dd.head())
+            return dd
+        if not exists(store_dir):
+            os.makedirs(store_dir, exist_ok=True)
+        data = ChallengeDB(split=self.split)
+        records = []
+        for img, gt in data:
+            logger.info(img.shape)
+            logger.info(gt.shape)
+            image_patches, cornels = slide_image(img, image_size)
+            for p, c in zip(image_patches, cornels):
+                idx = len(records)
+                record_name = pjoin(store_dir, f'data{idx}.pickle')
+                gtp = gt[
+                      c[0]:c[0] + image_size,
+                      c[1]:c[1] + image_size]
+                pickle.dump(
+                    (p, gtp, c),
+                    open(record_name, 'wb'))
+                records.append(dict(
+                    file=record_name
+                ))
+            break
+        data_csv = pd.DataFrame.from_records(records)
+        data_csv.to_csv(csv_file, index=False)
+        logger.info(data_csv.head())
+
 
     def __getitem__(self, index):
         image, bbox = self.data[index]
@@ -263,6 +315,10 @@ class BBloader(Dataset):
 
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
+
+    dd = BBloader(split='train')
+    dd._make_slices()
+    sys.exit(0)
 
     dev = torch.device('cpu')
     ddata = ChallengeDB(split='train')
