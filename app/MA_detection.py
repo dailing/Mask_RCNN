@@ -7,12 +7,13 @@ from os.path import join as pjoin, exists
 
 import numpy as np
 import pandas as pd
+import torch
 import torch.nn as nn
 from PIL import Image
 from torch.utils.data import Dataset
 
 from augment import FundusAOICrop, CompostImageAndLabel
-from model import mean_iou
+from model import mean_iou, Mrcnn
 from util.files import assert_exist, check_exist
 from util.logs import get_logger
 from util.npdraw import draw_bounding_box
@@ -35,10 +36,10 @@ class VGG(nn.Module):
             batch_norm=True)
 
         self.rpn_sliding_window = nn.Conv2d(
-            512, 256, 3, 1, 15
+            512, 256, 3, 1, 1
         )
-        self.box_classification = nn.Conv2d(256, 2 * 9, 1)
-        self.box_regression = nn.Conv2d(256, 4 * 9, 1)
+        self.box_classification = nn.Conv2d(256, 2 * 15, 1)
+        self.box_regression = nn.Conv2d(256, 4 * 15, 1)
         if init_weights:
             self._initialize_weights()
 
@@ -221,7 +222,6 @@ class BBloader(Dataset):
         store_dir = f'runs/fundus_image_data/{self.split}'
         csv_file = pjoin(store_dir, f'list.csv')
         image_size = 512
-        stride = 400
         if exists(csv_file):
             dd = pd.read_csv(csv_file)
             return dd
@@ -277,6 +277,8 @@ class BBloader(Dataset):
         center_cols = [self.ratio // 2 + i * self.ratio for i in range(acol)]
 
         for bbox_idx, label_box in enumerate(bbox):
+            if label_box[-1] != 1:
+                continue
             iou_map = np.zeros((self.n_archer, 1, arow, acol), np.float)
             for irow, icol, iarc in product(range(arow), range(acol), range(self.n_archer)):
                 abox = (
@@ -324,27 +326,43 @@ class BBloader(Dataset):
 
 
 if __name__ == '__main__':
-    dd = BBloader(split='train')
-    for img, (cls, reg, mask) in dd:
-        pcls = cls
-        preg = reg
-        real_img = img.transpose(1, 2, 0).copy()
-        for iarch, irow, icol in product(
-                range(pcls.shape[0]),
-                range(pcls.shape[2]),
-                range(pcls.shape[3])):
-            if pcls[iarch, 1, irow, icol] > pcls[iarch, 0, irow, icol]:
-                regresult = restore_box_reg(
-                    *preg[iarch, :, irow, icol].tolist(),
-                    dd.ratio // 2 + irow * dd.ratio,
-                    dd.ratio // 2 + icol * dd.ratio,
-                    *dd.archers[iarch],
-                )
-                real_img = draw_bounding_box(
-                    real_img, *regresult,
-                    (0, 1, 0, 1),
-                    bg_color=(1, 0, 0, 0.00))
-    sys.exit(0)
+    det = Mrcnn(
+        train_data=BBloader(split='train'),
+        net=VGG(),
+        model='runs/model_0300.model'
+    )
+
+
+    # det.step(300)
+
+    # net = VGG()
+    #
+    # dd = BBloader(split='test')
+    # for img, (cls, reg, mask) in dd:
+    #     pcls = cls
+    #     preg = reg
+    #     img = torch.Tensor(img[np.newaxis,::])
+    #     out = net(img)
+    #     logger.info(img.shape)
+    #     logger.info(out[0].shape)
+    #     sys.exit(0)
+    #     real_img = img.transpose(1, 2, 0).copy()
+    #     for iarch, irow, icol in product(
+    #             range(pcls.shape[0]),
+    #             range(pcls.shape[2]),
+    #             range(pcls.shape[3])):
+    #         if pcls[iarch, 1, irow, icol] > pcls[iarch, 0, irow, icol]:
+    #             regresult = restore_box_reg(
+    #                 *preg[iarch, :, irow, icol].tolist(),
+    #                 dd.ratio // 2 + irow * dd.ratio,
+    #                 dd.ratio // 2 + icol *  dd.ratio,
+    #                 *dd.archers[iarch],
+    #             )
+    #             real_img = draw_bounding_box(
+    #                 real_img, *regresult,
+    #                 (0, 1, 0, 1),
+    #                 bg_color=(1, 0, 0, 0.00))
+    # sys.exit(0)
 
     # dev = torch.device('cpu')
     # ddata = ChallengeDB(split='train')

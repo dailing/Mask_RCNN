@@ -199,11 +199,12 @@ class Mrcnn:
             model=None,
             train_data=None,
             test_data=None,
+            ratio=None,
             net=None):
         if device is None:
             device = 'cuda'
         self.device = torch.device(device)
-        if self.net is None:
+        if net is None:
             self.net = VGG()
         else:
             self.net = net
@@ -221,12 +222,15 @@ class Mrcnn:
             self.test_data = BBloader('train', 'voc')
         else:
             self.test_data = test_data
-
-        self.train_loader = DataLoader(self.train_data, 1, True, num_workers=2)
-        self.test_loader = DataLoader(self.test_data, 1, True, num_workers=2)
+        if ratio is None:
+            self.ratio = self.test_data.ratio
+        else:
+            self.ratio = ratio
+        self.train_loader = DataLoader(self.train_data, 1, True, num_workers=12)
+        self.test_loader = DataLoader(self.test_data, 1, True, num_workers=12)
         self.optm = SGD(
             self.net.parameters(),
-            lr=0.003,
+            lr=0.0003,
             momentum=0.9,
             nesterov=True,
             weight_decay=0.00005
@@ -273,6 +277,38 @@ class Mrcnn:
                 float(loss),
                 (self.epoach - 1) * len(self.train_loader) + idx)
 
+    def predict(self, image: np.ndarray):
+        image = image.transpose(2, 0, 1)
+        image = torch.Tensor(image)
+        cls, reg = self.net(image)
+        cls = cls.detach().cpu().numpy()
+        reg = reg.detach().cpu().numpy()
+        cls = cls.reshape((
+            cls.shape[0]//2,
+            2,
+            *cls.shape[1:]
+        ))
+        reg = reg.reshape((
+            reg.shape[0]//4,
+            4,
+            *reg.shape[1:]
+        ))
+        result = []
+        for iarch, irow, icol in product(
+                range(cls.shape[0]),
+                range(cls.shape[2]),
+                range(cls.shape[3])):
+            if cls[iarch, 1, irow, icol] > cls[iarch, 0, irow, icol]:
+                regresult = restore_box_reg(
+                    *reg[iarch, :, irow, icol].tolist(),
+                    self.ratio // 2 + irow * self.ratio,
+                    self.ratio // 2 + icol * self.ratio,
+                    *self.test_data.archers[iarch],
+                )
+                logger.info(f'draw bounding box {iarch} {irow}, {icol}')
+                result.append(regresult)
+        return result
+
     def test(self):
         tt = tqdm(self.test_loader, total=len(self.test_loader))
         for idx, (img, (cls, reg, mask)) in enumerate(tt):
@@ -292,20 +328,14 @@ class Mrcnn:
                 if pcls[iarch, 1, irow, icol] > pcls[iarch, 0, irow, icol]:
                     regresult = restore_box_reg(
                         *preg[iarch, :, irow, icol].tolist(),
-                        self.test_data.ratio // 2 + irow * self.test_data.ratio,
-                        self.test_data.ratio // 2 + icol * self.test_data.ratio,
+                        self.ratio // 2 + irow * self.ratio,
+                        self.ratio // 2 + icol * self.ratio,
                         *self.test_data.archers[iarch],
                     )
                     logger.info(f'draw bounding box {iarch} {irow}, {icol}')
                     real_img = draw_bounding_box(real_img, *regresult,
                                                  (0, 1, 0, 0.5),
                                                  bg_color=(1, 0, 0, 0.02))
-                    # real_img = draw_bounding_box(real_img, 
-                    #     self.test_data.ratio // 2 + irow * self.test_data.ratio,
-                    #     self.test_data.ratio // 2 + icol * self.test_data.ratio,
-                    #     *self.test_data.archers[iarch]
-                    # )
-
             logger.info(pcls.shape)
 
             plt.figure()
