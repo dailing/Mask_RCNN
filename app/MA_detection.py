@@ -19,7 +19,7 @@ from util.logs import get_logger
 from util.npdraw import draw_bounding_box
 from util.segmentation2bbox import segmentation2bbox
 from model import restore_box_reg
-
+import matplotlib.pyplot as plt
 logger = get_logger('ma detection')
 
 
@@ -81,7 +81,9 @@ class VGG(nn.Module):
                     padding=dilation,
                     dilation=dilation)
                 if batch_norm:
-                    layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+                    layers += [
+                        conv2d, nn.BatchNorm2d(v),
+                        nn.ReLU(inplace=True)]
                 else:
                     layers += [conv2d, nn.ReLU(inplace=True)]
                 in_channels = v
@@ -97,44 +99,66 @@ class ChallengeDB:
             FundusAOICrop(),
         ]
         if split == 'train':
-            self.dataFiles = tuple(
-                (
-                    assert_exist(pjoin(root, f'1. Original Images/a. Training Set/IDRiD_{i:02d}.jpg')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/'
-                    f'a. Training Set/1. Microaneurysms/IDRiD_{i:02d}_MA.tif')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/'
-                    f'a. Training Set/2. Haemorrhages/IDRiD_{i:02d}_HE.tif')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/a. Training Set/'
+            self.dataFiles = tuple((
+                assert_exist(pjoin(
+                    root,
+                    f'1. Original Images/a. Training Set/IDRiD_{i:02d}.jpg')),
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/a. Training Set/'
+                    f'1. Microaneurysms/IDRiD_{i:02d}_MA.tif')),
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/a. Training Set/'
+                    f'2. Haemorrhages/IDRiD_{i:02d}_HE.tif')),
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/a. Training Set/'
                     f'3. Hard Exudates/IDRiD_{i:02d}_EX.tif')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/a. Training Set/'
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/a. Training Set/'
                     f'4. Soft Exudates/IDRiD_{i:02d}_SE.tif')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/a. Training Set/'
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/a. Training Set/'
                     f'5. Optic Disc/IDRiD_{i:02d}_OD.tif'))
-                ) for i in range(1, 55)
-            )
+            ) for i in range(1, 55))
         elif split == 'test':
-            self.dataFiles = tuple(
-                (
-                    assert_exist(pjoin(root, f'1. Original Images/b. Testing Set/IDRiD_{i:02d}.jpg')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/'
+            self.dataFiles = tuple((
+                assert_exist(pjoin(
+                    root,
+                    f'1. Original Images/b. Testing Set/IDRiD_{i:02d}.jpg')),
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/'
                     f'b. Testing Set/1. Microaneurysms/IDRiD_{i:02d}_MA.tif')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/'
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/'
                     f'b. Testing Set/2. Haemorrhages/IDRiD_{i:02d}_HE.tif')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/b. Testing Set/'
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/b. Testing Set/'
                     f'3. Hard Exudates/IDRiD_{i:02d}_EX.tif')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/b. Testing Set/'
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/b. Testing Set/'
                     f'4. Soft Exudates/IDRiD_{i:02d}_SE.tif')),
-                    check_exist(pjoin(root, f'2. All Segmentation Groundtruths/b. Testing Set/'
+                check_exist(pjoin(
+                    root,
+                    f'2. All Segmentation Groundtruths/b. Testing Set/'
                     f'5. Optic Disc/IDRiD_{i:02d}_OD.tif'))
-                ) for i in range(55, 82)
-            )
+            ) for i in range(55, 82))
         else:
             raise Exception(f'split ({split}) not recognized!')
         self.cacheTransform = CompostImageAndLabel(self.transform)
         self.cacheDir = 'runs/cache/'
 
     def _getCacheItem(self, index):
-        cacheName = pjoin(self.cacheDir, f'ma_detection.{self.split}.{index}.pkl')
+        cacheName = pjoin(
+            self.cacheDir,
+            f'ma_detection.{self.split}.{index}.pkl')
         if False and exists(cacheName):
             result = pickle.load(open(cacheName, 'rb'))
             return result
@@ -213,8 +237,8 @@ class BBloader(Dataset):
                 (240, 480),
                 (480, 480),
             ]
-        self.n_archer = len(archers)
         self.archers = archers
+        self.n_archer = len(self.archers)
         self.ratio = 16
         self.file_list = self._make_slices()
 
@@ -280,7 +304,10 @@ class BBloader(Dataset):
             if label_box[-1] != 1:
                 continue
             iou_map = np.zeros((self.n_archer, 1, arow, acol), np.float)
-            for irow, icol, iarc in product(range(arow), range(acol), range(self.n_archer)):
+            for irow, icol, iarc in product(
+                    range(arow),
+                    range(acol),
+                    range(self.n_archer)):
                 abox = (
                     center_rows[irow],
                     center_cols[icol],
@@ -307,8 +334,13 @@ class BBloader(Dataset):
         sss = tuple((i[indices] for i in negative_points))
         negative[sss] = 0
         train_mask = positive | negative
-        archor_cls = np.concatenate((negative.astype(np.int), positive.astype(np.int)), axis=1)
-        for irow, icol, iarc in product(range(arow), range(acol), range(self.n_archer)):
+        archor_cls = np.concatenate(
+            (negative.astype(np.int), positive.astype(np.int)),
+            axis=1)
+        for irow, icol, iarc in product(
+                range(arow),
+                range(acol),
+                range(self.n_archer)):
             if not train_mask[iarc, 0, irow, icol]:
                 continue
             current_bbox = bbox[arc_to_bbox_map[iarc, 0, irow, icol]]
@@ -316,7 +348,11 @@ class BBloader(Dataset):
             t_col = (current_bbox[1] - center_cols[icol]) / self.archers[iarc][1]
             t_row_len = math.log(current_bbox[2] / self.archers[iarc][0])
             t_col_len = math.log(current_bbox[3] / self.archers[iarc][1])
-            archor_reg[iarc, :, irow, icol] = (t_row, t_col, t_row_len, t_col_len)
+            archor_reg[iarc, :, irow, icol] = (
+                t_row,
+                t_col,
+                t_row_len,
+                t_col_len)
         archor_cls = archor_cls.astype(np.float32)
         train_mask = train_mask.astype(np.float32)
         return image, (archor_cls, archor_reg, train_mask)
@@ -329,52 +365,29 @@ if __name__ == '__main__':
     det = Mrcnn(
         train_data=BBloader(split='train'),
         net=VGG(),
-        model='runs/model_0300.model'
+        model='runs/model_0193.model'
     )
+    # det.step()
 
+    image = Image.open('/data/home/d/data/challenge/A. Segmentation/'
+                       '1. Original Images/a. Training Set/IDRiD_34.jpg')
+    image = np.array(image)
+    imgs, pos = slide_image(image, 512, 0.2)
+    result_patchs = []
 
-    # det.step(300)
-
-    # net = VGG()
-    #
-    # dd = BBloader(split='test')
-    # for img, (cls, reg, mask) in dd:
-    #     pcls = cls
-    #     preg = reg
-    #     img = torch.Tensor(img[np.newaxis,::])
-    #     out = net(img)
-    #     logger.info(img.shape)
-    #     logger.info(out[0].shape)
-    #     sys.exit(0)
-    #     real_img = img.transpose(1, 2, 0).copy()
-    #     for iarch, irow, icol in product(
-    #             range(pcls.shape[0]),
-    #             range(pcls.shape[2]),
-    #             range(pcls.shape[3])):
-    #         if pcls[iarch, 1, irow, icol] > pcls[iarch, 0, irow, icol]:
-    #             regresult = restore_box_reg(
-    #                 *preg[iarch, :, irow, icol].tolist(),
-    #                 dd.ratio // 2 + irow * dd.ratio,
-    #                 dd.ratio // 2 + icol *  dd.ratio,
-    #                 *dd.archers[iarch],
-    #             )
-    #             real_img = draw_bounding_box(
-    #                 real_img, *regresult,
-    #                 (0, 1, 0, 1),
-    #                 bg_color=(1, 0, 0, 0.00))
-    # sys.exit(0)
-
-    # dev = torch.device('cpu')
-    # ddata = ChallengeDB(split='train')
-    # net = VGG()
-    # net = net.to(dev)
-    # image, label = ddata[23]
-    # plt.figure()
-    # out = net(torch.Tensor(image[np.newaxis, ::]).to(dev))
-    # print(out)
-    # image = image.transpose(1, 2, 0)
-    # logger.info(image.shape)
-    # plt.imshow(image)
-    # plt.figure()
-    # plt.imshow(label == 5)
-    # plt.show()
+    heatmap = np.zeros((15, image.shape[0]//16, image.shape[1]//16))
+    counter = np.zeros((15, image.shape[0]//16, image.shape[1]//16))
+    for img_patchs, p in zip(imgs, pos):
+        cls, reg = det.predict(img_patchs)
+        p = tuple(i // 16 for i in p)
+        hh = cls[:, 1, :, :]-cls[:, 0, :, :]
+        heatmap[:, p[0]:p[0]+32, p[1]:p[1]+32] += hh
+        counter[:, p[0]:p[0]+32, p[1]:p[1]+32] += 1
+    heatmap /= counter
+    for iarchor in range(15):
+        plt.figure()
+        plt.imshow(heatmap[iarchor, :, :])
+        plt.colorbar()
+        plt.figure()
+        plt.imshow(counter[iarchor, :, :])
+        plt.show()

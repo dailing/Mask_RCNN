@@ -14,6 +14,10 @@ from util.logs import get_logger
 from voc2012 import VOC
 from tensorboardX import SummaryWriter
 from util.npdraw import draw_bounding_box
+from functools import reduce
+import random
+import matplotlib.pyplot as plt
+
 
 logger = get_logger('fuck me')
 
@@ -75,7 +79,10 @@ class VGG(nn.Module):
                     padding=dilation,
                     dilation=dilation)
                 if batch_norm:
-                    layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+                    layers += [
+                        conv2d,
+                        nn.BatchNorm2d(v),
+                        nn.ReLU(inplace=True)]
                 else:
                     layers += [conv2d, nn.ReLU(inplace=True)]
                 in_channels = v
@@ -137,16 +144,21 @@ class BBloader(Dataset):
         center_rows = [self.ratio // 2 + i * self.ratio for i in range(arow)]
         center_cols = [self.ratio // 2 + i * self.ratio for i in range(acol)]
 
-        for irow, icol, iarc in product(range(arow), range(acol), range(self.n_archer)):
+        for irow, icol, iarc in product(
+                range(arow),
+                range(acol),
+                range(self.n_archer)):
             abox = (
                 center_rows[irow],
                 center_cols[icol],
                 *self.archers[iarc]
             )
-            iou_on_each_bbox = np.array([mean_iou(abox, label_box) for label_box in bbox])
+            iou_on_each_bbox = np.array(
+                [mean_iou(abox, label_box) for label_box in bbox])
             iou_map[iarc, 0, irow, icol] = np.max(iou_on_each_bbox)
             if iou_map[iarc, 0, irow, icol] > 0.5:
-                arc_to_bbox_map[iarc, 0, irow, icol] = np.argmax(iou_on_each_bbox)
+                arc_to_bbox_map[iarc, 0, irow, icol] = np.argmax(
+                    iou_on_each_bbox)
         positive = iou_map > 0.5
         negative = iou_map < 0.3
         n_postive = np.sum(positive)
@@ -163,17 +175,25 @@ class BBloader(Dataset):
         # logger.info(n_postive, np.sum(negative), np.sum(train_mask))
         # logger.info(positive.shape)
 
-        archor_cls = np.concatenate((negative.astype(np.int), positive.astype(np.int)), axis=1)
+        archor_cls = np.concatenate(
+            (negative.astype(np.int), positive.astype(np.int)),
+            axis=1)
 
-        for irow, icol, iarc in product(range(arow), range(acol), range(self.n_archer)):
+        for irow, icol, iarc in product(
+                range(arow),
+                range(acol),
+                range(self.n_archer)):
             if not train_mask[iarc, 0, irow, icol]:
                 continue
             current_bbox = bbox[arc_to_bbox_map[iarc, 0, irow, icol]]
-            t_row = (current_bbox[0] - center_rows[irow]) / self.archers[iarc][0]
-            t_col = (current_bbox[1] - center_cols[icol]) / self.archers[iarc][1]
+            t_row = (current_bbox[0] - center_rows[irow]) / \
+                self.archers[iarc][0]
+            t_col = (current_bbox[1] - center_cols[icol]) / \
+                self.archers[iarc][1]
             t_row_len = math.log(current_bbox[2] / self.archers[iarc][0])
             t_col_len = math.log(current_bbox[3] / self.archers[iarc][1])
-            archor_reg[iarc, :, irow, icol] = (t_row, t_col, t_row_len, t_col_len)
+            archor_reg[iarc, :, irow, icol] = (
+                t_row, t_col, t_row_len, t_col_len)
         # logger.info(archor_cls.shape)
 
         archor_cls = archor_cls.astype(np.float32)
@@ -226,7 +246,11 @@ class Mrcnn:
             self.ratio = self.test_data.ratio
         else:
             self.ratio = ratio
-        self.train_loader = DataLoader(self.train_data, 1, True, num_workers=12)
+        self.train_loader = DataLoader(
+            self.train_data,
+            3,
+            True,
+            num_workers=12)
         self.test_loader = DataLoader(self.test_data, 1, True, num_workers=12)
         self.optm = SGD(
             self.net.parameters(),
@@ -236,18 +260,30 @@ class Mrcnn:
             weight_decay=0.00005
         )
         self.logWriter = SummaryWriter(logdir=f'log/fuck')
+        self.thresh = 0.999
 
     def train(self):
         self.net.train()
         tt = tqdm(self.train_loader, total=len(self.train_loader))
         for idx, (img, (cls, reg, mask)) in enumerate(tt):
-            if mask.sum().cpu() == 0:
+            mask = mask.numpy()
+            mask_sum = mask.sum()
+            rand_mask = np.random.rand(*mask.shape) > (self.thresh) ** 0.02
+            rand_mask_sum = rand_mask.sum()
+            self.thresh += (rand_mask_sum - mask_sum) / mask.size
+            mask += rand_mask
+            mask = mask > 0
+            mask_sum = mask.sum()
+            if mask_sum == 0:
                 continue
+
+            mask = torch.Tensor(mask.astype(np.float32))
+            mask = mask.to(self.device)
+
             img = img.to(self.device)
             cls = cls.to(self.device)
             reg = reg.to(self.device)
             mask = mask.to(self.device)
-
             pcls, preg = self.net(img)
 
             # Calculate Loss_cls
@@ -262,11 +298,12 @@ class Mrcnn:
             L_reg = torch.abs(preg - reg)
             L_reg = torch.where(L_reg < 1, 0.5 * L_reg ** 2, L_reg - 0.5)
             positive = cls[:, :, 1:, :, :]
+            positive_sum = positive.sum()
             L_reg = L_reg * positive
-            L_reg = L_reg.sum() / positive.sum()
+            L_reg = L_reg.sum() / positive_sum
 
             self.optm.zero_grad()
-            loss = L_cls + 0.5 * L_reg
+            loss = L_cls + (0.5 * L_reg if positive_sum > 0 else 0)
             loss.backward()
             self.optm.step()
 
@@ -278,35 +315,52 @@ class Mrcnn:
                 (self.epoach - 1) * len(self.train_loader) + idx)
 
     def predict(self, image: np.ndarray):
+        # plt.figure()
+        # plt.imshow(image)
+        # logger.info(image.shape)
         image = image.transpose(2, 0, 1)
+        image = image[np.newaxis, ::]
+        image = image.astype(np.float32)
         image = torch.Tensor(image)
+        image = image.to(self.device)
         cls, reg = self.net(image)
         cls = cls.detach().cpu().numpy()
         reg = reg.detach().cpu().numpy()
         cls = cls.reshape((
-            cls.shape[0]//2,
+            cls.shape[1] // 2,
             2,
-            *cls.shape[1:]
+            *cls.shape[2:]
         ))
-        reg = reg.reshape((
-            reg.shape[0]//4,
-            4,
-            *reg.shape[1:]
-        ))
-        result = []
-        for iarch, irow, icol in product(
-                range(cls.shape[0]),
-                range(cls.shape[2]),
-                range(cls.shape[3])):
-            if cls[iarch, 1, irow, icol] > cls[iarch, 0, irow, icol]:
-                regresult = restore_box_reg(
-                    *reg[iarch, :, irow, icol].tolist(),
-                    self.ratio // 2 + irow * self.ratio,
-                    self.ratio // 2 + icol * self.ratio,
-                    *self.test_data.archers[iarch],
-                )
-                logger.info(f'draw bounding box {iarch} {irow}, {icol}')
-                result.append(regresult)
+        return cls, reg
+        # logger.info(cls.shape)
+        # idx = 0
+        # plt.figure()
+        # plt.imshow(cls[idx, 1] - cls[idx, 0], cmap='gray')
+        # plt.colorbar()
+        # plt.show()
+        # return None
+        # reg = reg.reshape((
+        #     reg.shape[1] // 4,
+        #     4,
+        #     *reg.shape[2:]
+        # ))
+        # logger.info(cls.shape)
+        # result = []
+        # for iarch, irow, icol in product(
+        #         range(cls.shape[0]),
+        #         range(cls.shape[2]),
+        #         range(cls.shape[3])):
+        #     if cls[iarch, 1, irow, icol] > cls[iarch, 0, irow, icol]:
+        #         reg[iarch, :, irow, icol]
+        #         logger.info(f'{iarch}, {len(self.test_data.archers)}')
+        #         self.test_data.archers[iarch]
+        #         regresult = restore_box_reg(
+        #             *reg[iarch, :, irow, icol].tolist(),
+        #             self.ratio // 2 + irow * self.ratio,
+        #             self.ratio // 2 + icol * self.ratio,
+        #             *self.test_data.archers[iarch],
+        #         )
+        #         result.append(regresult)
         return result
 
     def test(self):
@@ -346,7 +400,9 @@ class Mrcnn:
         for i in range(n):
             self.epoach += 1
             self.train()
-            torch.save(self.net.state_dict(), f'runs/model_{self.epoach:04}.model')
+            torch.save(
+                self.net.state_dict(),
+                f'runs/model_{self.epoach:04}.model')
 
 
 if __name__ == '__main__':
@@ -388,7 +444,10 @@ if __name__ == '__main__':
         logger.info(mask.shape)
         logger.info(np.sum(mask))
         logger.info(np.sum(cls[:, 1, :, :]))
-        for irow, icol, iarch in product(range(mask.shape[2]), range(mask.shape[3]), range(mask.shape[0])):
+        for irow, icol, iarch in product(
+                range(mask.shape[2]),
+                range(mask.shape[3]),
+                range(mask.shape[0])):
             # if mask[iarch, 0, irow, icol] == 0:
             #     continue
             if cls[iarch, 1, irow, icol] == 0:
