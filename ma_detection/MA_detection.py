@@ -15,7 +15,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import SGD
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
-
+from torchvision.utils import make_grid
 from augment import FundusAOICrop, CompostImageAndLabel
 from model import mean_iou, Mrcnn
 from util.files import assert_exist, check_exist
@@ -25,6 +25,11 @@ from util.segmentation2bbox import segmentation2bbox
 from model import restore_box_reg
 import matplotlib.pyplot as plt
 logger = get_logger('ma detection')
+logWriter = SummaryWriter(logdir=f'log/fuck')
+
+# debug = os.getenv('DEBUG')
+
+debug = False
 
 
 class VGG(nn.Module):
@@ -40,7 +45,7 @@ class VGG(nn.Module):
             batch_norm=True)
 
         self.rpn_sliding_window = nn.Conv2d(
-            512, 256, 3, 1, 1
+            512, 256, 1, 1, 0
         )
         self.box_classification = nn.Conv2d(256, 2 * 1, 1)
         self.box_regression = nn.Conv2d(256, 2 * 1, 1)
@@ -225,7 +230,9 @@ class BBloader(Dataset):
         self.split = split
         if archers is None:
             archers = [
-                (30, 30),
+                (16, 16),
+                # (48, 48),
+                # (64, 64),
             ]
         self.archers = archers
         self.n_archer = len(self.archers)
@@ -274,6 +281,12 @@ class BBloader(Dataset):
         data_csv.to_csv(csv_file, index=False)
         return data_csv
 
+    def get_bounding_box(self, index):
+        if index >= self.__len__():
+            raise IndexError
+        image, bbox = pickle.load(open(self.file_list.file[index], 'rb'))
+        return image, bbox
+
     def __getitem__(self, index):
         if index >= self.__len__():
             raise IndexError()
@@ -285,16 +298,15 @@ class BBloader(Dataset):
 
         arow, acol = nrow // self.ratio, ncol // self.ratio
         archor_reg = np.zeros((self.n_archer, 2, arow, acol), np.float32)
-        positive = np.zeros((self.n_archer, 1, arow, acol), np.int)
-        negative = np.zeros((self.n_archer, 1, arow, acol), np.int)
         arc_to_bbox_map = np.zeros((self.n_archer, 1, arow, acol), np.int) - 1
 
         center_rows = [self.ratio // 2 + i * self.ratio for i in range(arow)]
         center_cols = [self.ratio // 2 + i * self.ratio for i in range(acol)]
+        iou_map = np.zeros((len(bbox), self.n_archer, 1, arow, acol))
+        # mean_iou_map has shape of n_bbox, n_archer, 1, row, col
         for bbox_idx, label_box in enumerate(bbox):
-            if label_box[-1] != 1:
+            if label_box[-1] != 0:
                 continue
-            iou_map = np.zeros((self.n_archer, 1, arow, acol), np.float)
             for irow, icol, iarc in product(
                     range(arow),
                     range(acol),
@@ -304,31 +316,70 @@ class BBloader(Dataset):
                     center_cols[icol],
                     *self.archers[iarc]
                 )
-                iou_map[iarc, 0, irow, icol] = mean_iou(abox, label_box)
-            h_thresh = 0
-            l_thresh = 0
-            positive += iou_map > h_thresh
-            negative += iou_map <= l_thresh
-            arc_to_bbox_map[iou_map >= h_thresh] = bbox_idx
-        positive = positive > 0
-        positive = positive.astype(np.float32)
-        negative = negative > 0
-        negative = negative.astype(np.float32)
+                iou_map[bbox_idx, iarc, 0, irow, icol] = mean_iou(
+                    abox, label_box)
+        if len(bbox) == 0:
+            positive = np.zeros(iou_map.shape[1:])
+            negative = np.zeros(iou_map.shape[1:]) + 1
+        else:
+            # TODO deal with the fucking mean_iou thing
+            box_map = np.argmax(
+                np.concatenate((np.zeros((1, *iou_map.shape[1:])), iou_map)),
+                axis=0)
+            max_iou = np.max(iou_map, axis=0)
+            positive = max_iou > 0.1
+            positive = positive.astype(np.float32)
+            negative = max_iou == 0
+            negative = negative.astype(np.float32)
+            box_map *= positive.astype(np.int64)
+
+            if debug:
+                plt.figure()
+                plt.imshow(max_iou[0, 0, :, :])
+                plt.colorbar()
+                plt.figure()
+                plt.imshow(box_map[0, 0, :, :])
+                plt.colorbar()
+                plt.figure()
+                draw_box = image.transpose(1, 2, 0)
+                for sb in bbox:
+                    if sb[-1] != 0:
+                        continue
+                    draw_box = draw_bounding_box(
+                        draw_box,
+                        *sb[:4],
+                    )
+                plt.imshow(draw_box)
+                plt.colorbar()
+                # plt.show()
 
         n_postive = np.sum(positive)
-        mask = positive > 0
-        random_sample = np.random.rand(*mask.shape)
-        mask += random_sample > self.thresh
-        mask = mask > 0
+        random_sample = np.random.rand(*negative.shape) * negative
+        neg_sample = random_sample >= min(
+            self.thresh, np.max(random_sample) * 0.999)
+        mask = (positive + neg_sample) > 0
         mask = mask.astype(np.float32)
-        n_psample = np.sum((mask * positive) > 0)
-        n_nsample = np.sum((mask * negative) > 0)
-        self.thresh += n_psample / self.smooth_factor
-        self.thresh -= n_nsample / self.smooth_factor
+        n_psample = np.sum(positive > 0)
+        n_nsample = np.sum(neg_sample > 0)
+        self.thresh -= n_psample / self.smooth_factor
+        self.thresh += n_nsample / self.smooth_factor
+        # logger.info(f'{n_psample:6d} {n_nsample:6d} {self.thresh:.6f}')
 
         archor_cls = np.concatenate(
             (negative.astype(np.int), positive.astype(np.int)),
             axis=1)
+
+        if debug:
+            plt.figure()
+            plt.imshow(archor_cls[0, 0, :, :])
+            plt.colorbar()
+            plt.figure()
+            plt.imshow(archor_cls[0, 1, :, :])
+            plt.colorbar()
+            plt.figure()
+            plt.imshow(mask[0, 0, :, :])
+            plt.colorbar()
+            plt.show()
 
         # logger.info(f'{arow}, {acol}, {self.n_archer}, {len(bbox)}')
         for irow, icol, iarc in product(
@@ -378,7 +429,7 @@ class MaDetector:
             self.train_data,
             3,
             True,
-            num_workers=5)
+            num_workers=0)
         self.optm = SGD(
             self.net.parameters(),
             lr=0.0003,
@@ -386,20 +437,17 @@ class MaDetector:
             nesterov=True,
             weight_decay=0.00005
         )
-        self.logWriter = SummaryWriter(logdir=f'log/fuck')
 
     def train(self):
         self.net.train()
         tt = tqdm(self.train_loader, total=len(self.train_loader))
         for idx, (img, (cls, reg, mask)) in enumerate(tt):
-            npmask = mask.numpy()
-            if npmask.sum() == 0:
-                continue
-            mask = mask.to(self.device)
+            # npmask = mask.numpy()
+            # mask = mask.to(self.device)
 
             img = img.to(self.device)
             cls = cls.to(self.device)
-            reg = reg.to(self.device)
+            # reg = reg.to(self.device)
             mask = mask.to(self.device)
             pcls, preg = self.net(img)
 
@@ -411,22 +459,23 @@ class MaDetector:
             L_cls = - pcls.sum() / mask.sum()
 
             # Calculate Loss_reg
-            preg = preg.reshape(reg.shape)
-            L_reg = torch.abs(preg - reg)
-            L_reg = torch.where(L_reg < 1, 0.5 * L_reg ** 2, L_reg - 0.5)
-            positive = cls[:, :, 1:, :, :]
-            positive_sum = positive.sum()
-            L_reg = L_reg * positive
-            L_reg = L_reg.sum() / positive_sum
+            # preg = preg.reshape(reg.shape)
+            # L_reg = torch.abs(preg - reg)
+            # L_reg = torch.where(L_reg < 1, 0.5 * L_reg ** 2, L_reg - 0.5)
+            # positive = cls[:, :, 1:, :, :]
+            # positive_sum = positive.sum()
+            # L_reg = L_reg * positive
+            # L_reg = L_reg.sum() / positive_sum
 
             self.optm.zero_grad()
-            loss = L_cls + (0.1 * L_reg if positive_sum > 0 else 0)
+            # loss = L_cls + 0.1 * L_reg
+            loss = L_cls
             loss.backward()
             self.optm.step()
 
             loss = loss.detach().cpu()
             tt.set_postfix_str(str(loss))
-            self.logWriter.add_scalar(
+            logWriter.add_scalar(
                 'train/loss',
                 float(loss),
                 (self.epoach - 1) * len(self.train_loader) + idx)
@@ -436,8 +485,8 @@ class MaDetector:
             self.epoach += 1
             self.train()
 
-if __name__ == '__main__':
 
+if __name__ == '__main__':
     detector = MaDetector(
         device='cuda',
         net=VGG(),
