@@ -16,6 +16,7 @@ from torch.optim import SGD
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from torchvision.utils import make_grid
+
 from augment import FundusAOICrop, CompostImageAndLabel
 from model import mean_iou, Mrcnn
 from util.files import assert_exist, check_exist
@@ -27,9 +28,7 @@ import matplotlib.pyplot as plt
 logger = get_logger('ma detection')
 logWriter = SummaryWriter(logdir=f'log/fuck')
 
-# debug = os.getenv('DEBUG')
-
-debug = False
+debug = os.getenv('DEBUG')
 
 
 class VGG(nn.Module):
@@ -230,7 +229,7 @@ class BBloader(Dataset):
         self.split = split
         if archers is None:
             archers = [
-                (16, 16),
+                (32, 32),
                 # (48, 48),
                 # (64, 64),
             ]
@@ -307,6 +306,7 @@ class BBloader(Dataset):
         for bbox_idx, label_box in enumerate(bbox):
             if label_box[-1] != 0:
                 continue
+            # iou_map = np.zeros((self.n_archer, 1, arow, acol), np.float)
             for irow, icol, iarc in product(
                     range(arow),
                     range(acol),
@@ -318,49 +318,36 @@ class BBloader(Dataset):
                 )
                 iou_map[bbox_idx, iarc, 0, irow, icol] = mean_iou(
                     abox, label_box)
+        # TODO deal with the fucking mean_iou thing
+        if debug and len(bbox) > 0:
+            show_img = np.max(iou_map, axis=1, keepdims=True)
+            logger.info(show_img.shape)
+            show_img = make_grid(torch.Tensor(iou_map[:, 0, :, :, :]))
+            logWriter.add_image('iou_map', show_img, index)
+            logger.info(show_img.shape)
+            plt.figure()
+            plt.imshow(show_img)
+            plt.show()
         if len(bbox) == 0:
             positive = np.zeros(iou_map.shape[1:])
-            negative = np.zeros(iou_map.shape[1:]) + 1
+            negative = np.zeros(iou_map.shape[1:])
         else:
-            # TODO deal with the fucking mean_iou thing
-            box_map = np.argmax(
-                np.concatenate((np.zeros((1, *iou_map.shape[1:])), iou_map)),
-                axis=0)
-            max_iou = np.max(iou_map, axis=0)
-            positive = max_iou > 0.1
+            # logger.info(iou_map.shape)
+            iou_map = np.max(iou_map, axis=0)
+            positive = iou_map > 0.5
             positive = positive.astype(np.float32)
-            negative = max_iou == 0
+            negative = iou_map < 0.2
             negative = negative.astype(np.float32)
-            box_map *= positive.astype(np.int64)
 
-            if debug:
-                plt.figure()
-                plt.imshow(max_iou[0, 0, :, :])
-                plt.colorbar()
-                plt.figure()
-                plt.imshow(box_map[0, 0, :, :])
-                plt.colorbar()
-                plt.figure()
-                draw_box = image.transpose(1, 2, 0)
-                for sb in bbox:
-                    if sb[-1] != 0:
-                        continue
-                    draw_box = draw_bounding_box(
-                        draw_box,
-                        *sb[:4],
-                    )
-                plt.imshow(draw_box)
-                plt.colorbar()
-                # plt.show()
-
+        loss_area = ((positive) + (negative)) > 0
         n_postive = np.sum(positive)
-        random_sample = np.random.rand(*negative.shape) * negative
-        neg_sample = random_sample >= min(
-            self.thresh, np.max(random_sample) * 0.999)
-        mask = (positive + neg_sample) > 0
+        mask = positive > 0
+        random_sample = np.random.rand(*mask.shape) * loss_area
+        mask += random_sample >= min(self.thresh, np.max(random_sample) * 0.98)
+        mask = mask > 0
         mask = mask.astype(np.float32)
-        n_psample = np.sum(positive > 0)
-        n_nsample = np.sum(neg_sample > 0)
+        n_psample = np.sum((mask * positive) > 0)
+        n_nsample = np.sum((mask * negative) > 0)
         self.thresh -= n_psample / self.smooth_factor
         self.thresh += n_nsample / self.smooth_factor
         # logger.info(f'{n_psample:6d} {n_nsample:6d} {self.thresh:.6f}')
@@ -368,18 +355,6 @@ class BBloader(Dataset):
         archor_cls = np.concatenate(
             (negative.astype(np.int), positive.astype(np.int)),
             axis=1)
-
-        if debug:
-            plt.figure()
-            plt.imshow(archor_cls[0, 0, :, :])
-            plt.colorbar()
-            plt.figure()
-            plt.imshow(archor_cls[0, 1, :, :])
-            plt.colorbar()
-            plt.figure()
-            plt.imshow(mask[0, 0, :, :])
-            plt.colorbar()
-            plt.show()
 
         # logger.info(f'{arow}, {acol}, {self.n_archer}, {len(bbox)}')
         for irow, icol, iarc in product(
@@ -429,7 +404,7 @@ class MaDetector:
             self.train_data,
             3,
             True,
-            num_workers=10)
+            num_workers=0)
         self.optm = SGD(
             self.net.parameters(),
             lr=0.0003,
@@ -442,12 +417,12 @@ class MaDetector:
         self.net.train()
         tt = tqdm(self.train_loader, total=len(self.train_loader))
         for idx, (img, (cls, reg, mask)) in enumerate(tt):
-            # npmask = mask.numpy()
-            # mask = mask.to(self.device)
+            npmask = mask.numpy()
+            mask = mask.to(self.device)
 
             img = img.to(self.device)
             cls = cls.to(self.device)
-            # reg = reg.to(self.device)
+            reg = reg.to(self.device)
             mask = mask.to(self.device)
             pcls, preg = self.net(img)
 
@@ -459,17 +434,16 @@ class MaDetector:
             L_cls = - pcls.sum() / mask.sum()
 
             # Calculate Loss_reg
-            # preg = preg.reshape(reg.shape)
-            # L_reg = torch.abs(preg - reg)
-            # L_reg = torch.where(L_reg < 1, 0.5 * L_reg ** 2, L_reg - 0.5)
-            # positive = cls[:, :, 1:, :, :]
-            # positive_sum = positive.sum()
-            # L_reg = L_reg * positive
-            # L_reg = L_reg.sum() / positive_sum
+            preg = preg.reshape(reg.shape)
+            L_reg = torch.abs(preg - reg)
+            L_reg = torch.where(L_reg < 1, 0.5 * L_reg ** 2, L_reg - 0.5)
+            positive = cls[:, :, 1:, :, :]
+            positive_sum = positive.sum()
+            L_reg = L_reg * positive
+            L_reg = L_reg.sum() / positive_sum
 
             self.optm.zero_grad()
-            # loss = L_cls + 0.1 * L_reg
-            loss = L_cls
+            loss = L_cls + 0.1 * L_reg
             loss.backward()
             self.optm.step()
 
@@ -480,65 +454,81 @@ class MaDetector:
                 float(loss),
                 (self.epoach - 1) * len(self.train_loader) + idx)
 
-    def predict(self, image):
-        self.net.eval()
-
     def step(self, n=300):
         for i in tqdm(range(n), total=n):
             self.epoach += 1
             self.train()
-            torch.save(self.net.state_dict(), f'runs/{self.epoach:05d}.pth')
 
+
+def get_bbox_statics():
+    bbox = BBloader(split='train')
+    row_len = []
+    col_len = []
+    for i in range(bbox.__len__()):
+        image, box = bbox.get_bounding_box(i)
+        for crow, ccol, rrow, rcol, ltype in box:
+            if ltype != 0:
+                continue
+            row_len.append(rrow)
+            col_len.append(rcol)
+    row_len = np.array(row_len)
+    col_len = np.array(col_len)
+    # fig, ax = plt.subplots(tight_layout=True)
+    plt.hist2d(row_len, col_len, bins=30)
+    plt.colorbar()
+    plt.show()
 
 if __name__ == '__main__':
-    
-    # detector = MaDetector(
-    #     device='cuda',
-    #     net=VGG(),
-    # )
-    # detector.step()
-    # sys.exit(0)
+    get_bbox_statics()
+    sys.exit(0)
 
-    # loader = BBloader(split='train')
+    detector = MaDetector(
+        device='cuda',
+        net=VGG(),
+    )
+    detector.step()
+    sys.exit(0)
 
-    # for i in range(100):
-    #     idx = random.randint(0, len(loader))
-    #     iimg, (classification, regression, mask) = loader[idx]
-    #     logger.info(iimg.shape)
+    loader = BBloader(split='train')
 
-    #     plt.figure()
-    #     plt.imshow(classification[0, 1, :, :])
-    #     plt.colorbar()
+    for i in range(100):
+        idx = random.randint(0, len(loader))
+        iimg, (classification, regression, mask) = loader[idx]
+        logger.info(iimg.shape)
 
-    #     plt.figure()
-    #     plt.imshow(iimg.transpose(1, 2, 0))
+        plt.figure()
+        plt.imshow(classification[0, 1, :, :])
+        plt.colorbar()
 
-    #     plt.figure()
-    #     plt.imshow(mask[0, 0, ::])
-    #     plt.show()
-    # sys.exit(0)
+        plt.figure()
+        plt.imshow(iimg.transpose(1, 2, 0))
 
-    # logger.info(iimg.shape)
+        plt.figure()
+        plt.imshow(mask[0, 0, ::])
+        plt.show()
+    sys.exit(0)
 
-    # image = Image.open('/data/home/d/data/challenge/A. Segmentation/'
-    #                    '1. Original Images/a. Training Set/IDRiD_34.jpg')
-    # image = np.array(image)
-    # imgs, pos = slide_image(image, 512, 0.2)
-    # result_patchs = []
+    logger.info(iimg.shape)
 
-    # heatmap = np.zeros((1, image.shape[0]//16, image.shape[1]//16))
-    # counter = np.zeros((1, image.shape[0]//16, image.shape[1]//16))
-    # for img_patchs, p in zip(imgs, pos):
-    #     cls, reg = det.predict(img_patchs)
-    #     p = tuple(i // 16 for i in p)
-    #     hh = cls[:, 1, :, :]-cls[:, 0, :, :]
-    #     heatmap[:, p[0]:p[0]+32, p[1]:p[1]+32] += hh
-    #     counter[:, p[0]:p[0]+32, p[1]:p[1]+32] += 1
-    # heatmap /= counter
-    # for iarchor in range(15):
-    #     plt.figure()
-    #     plt.imshow(heatmap[iarchor, :, :])
-    #     plt.colorbar()
-    #     plt.figure()
-    #     plt.imshow(counter[iarchor, :, :])
-    #     plt.show()
+    image = Image.open('/data/home/d/data/challenge/A. Segmentation/'
+                       '1. Original Images/a. Training Set/IDRiD_34.jpg')
+    image = np.array(image)
+    imgs, pos = slide_image(image, 512, 0.2)
+    result_patchs = []
+
+    heatmap = np.zeros((1, image.shape[0]//16, image.shape[1]//16))
+    counter = np.zeros((1, image.shape[0]//16, image.shape[1]//16))
+    for img_patchs, p in zip(imgs, pos):
+        cls, reg = det.predict(img_patchs)
+        p = tuple(i // 16 for i in p)
+        hh = cls[:, 1, :, :]-cls[:, 0, :, :]
+        heatmap[:, p[0]:p[0]+32, p[1]:p[1]+32] += hh
+        counter[:, p[0]:p[0]+32, p[1]:p[1]+32] += 1
+    heatmap /= counter
+    for iarchor in range(15):
+        plt.figure()
+        plt.imshow(heatmap[iarchor, :, :])
+        plt.colorbar()
+        plt.figure()
+        plt.imshow(counter[iarchor, :, :])
+        plt.show()

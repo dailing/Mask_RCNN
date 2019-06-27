@@ -1,0 +1,438 @@
+import numpy as np
+from torch.optim import Adam, SGD
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+from util.process_pool import run_once
+from util.logs import get_logger
+from PIL import Image
+import torch.nn.functional as F
+from abc import ABC, abstractmethod
+import torch
+import pickle
+from os.path import join as pjoin
+from os.path import exists
+from os import makedirs
+from hashlib import md5
+import shutil
+import sys
+import torch.nn as nn
+import matplotlib.pyplot as plt
+import cv2
+
+from tensorboardX import SummaryWriter
+from abc import ABC, abstractmethod
+import pandas as pd
+from PIL import Image, ImageEnhance, ImageOps
+import torchvision.models.resnet
+from util.augment import ResizeKeepAspectRatio, RandomCrop, Compose, \
+    RandomNoise, RandFlip, ToTensor, ToFloat
+from itertools import product
+from sqlitedict import SqliteDict
+from io import BytesIO
+from tensorboardX import SummaryWriter
+from tqdm import tqdm
+
+logger = get_logger('fff')
+summery_writer = SummaryWriter(logdir='log/dcl_log')
+
+device = torch.device('cuda')
+
+
+def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
+    """3x3 convolution with padding"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=dilation, groups=groups, bias=False,
+                     dilation=dilation)
+
+
+def conv1x1(in_planes, out_planes, stride=1):
+    """1x1 convolution"""
+    return nn.Conv2d(in_planes, out_planes,
+                     kernel_size=1, stride=stride, bias=False)
+
+
+class Bottleneck(nn.Module):
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
+                 base_width=64, dilation=1, norm_layer=None):
+        super(Bottleneck, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        width = int(planes * (base_width / 64.)) * groups
+        # Both self.conv2 and self.downsample
+        # layers downsample the input when stride != 1
+        self.conv1 = conv1x1(inplanes, width)
+        self.bn1 = norm_layer(width)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation)
+        self.bn2 = norm_layer(width)
+        self.conv3 = conv1x1(width, planes * self.expansion)
+        self.bn3 = norm_layer(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+
+
+class ResNet(nn.Module):
+
+    def __init__(self, num_classes=1000,
+                 zero_init_residual=False,
+                 groups=1, width_per_group=64,
+                 replace_stride_with_dilation=None,
+                 norm_layer=None):
+        super(ResNet, self).__init__()
+        layers = [3, 4, 6, 3]
+        block = Bottleneck
+        self.overall_stride = 32
+        self.input_width = 448
+        self.N = 7
+
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        self._norm_layer = norm_layer
+
+        self.inplanes = 64
+        self.dilation = 1
+        if replace_stride_with_dilation is None:
+            replace_stride_with_dilation = [False, False, False]
+        if len(replace_stride_with_dilation) != 3:
+            raise ValueError(f"replace_stride_with_dilation should be None "
+                             "or a 3-element tuple, got"
+                             " {replace_stride_with_dilation}")
+        self.groups = groups
+        self.base_width = width_per_group
+        self.conv1 = nn.Conv2d(
+            3, self.inplanes, kernel_size=7, stride=2,
+            padding=3, bias=False)
+        self.bn1 = norm_layer(self.inplanes)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2,
+                                       dilate=replace_stride_with_dilation[0])
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2,
+                                       dilate=replace_stride_with_dilation[1])
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
+                                       dilate=replace_stride_with_dilation[2])
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+        self.fc_cls = nn.Linear(512 * block.expansion, num_classes)
+        self.fc_adv = nn.Linear(512 * block.expansion, 2)
+
+        # construction learning
+        self.construction_learning_conv = nn.Conv2d(
+            512*block.expansion, 2, kernel_size=1, stride=1)
+        self.construction_learning_relu = nn.ReLU()
+        self.construction_learning_pool = \
+            nn.AdaptiveAvgPool2d((self.N, self.N))
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+        # Zero-initialize the last BN in each residual branch,
+        # so that the residual branch starts with zeros,
+        # and each residual block behaves like an identity.
+        # This improves the model by 0.2~0.3%
+        # according to https://arxiv.org/abs/1706.02677
+        if zero_init_residual:
+            for m in self.modules():
+                if isinstance(m, Bottleneck):
+                    nn.init.constant_(m.bn3.weight, 0)
+                elif isinstance(m, BasicBlock):
+                    nn.init.constant_(m.bn2.weight, 0)
+
+    def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
+        norm_layer = self._norm_layer
+        downsample = None
+        previous_dilation = self.dilation
+        if dilate:
+            self.dilation *= stride
+            stride = 1
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                conv1x1(self.inplanes, planes * block.expansion, stride),
+                norm_layer(planes * block.expansion),
+            )
+
+        layers = []
+        layers.append(block(
+            self.inplanes, planes, stride, downsample, self.groups,
+            self.base_width, previous_dilation, norm_layer))
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            layers.append(block(
+                self.inplanes, planes, groups=self.groups,
+                base_width=self.base_width, dilation=self.dilation,
+                norm_layer=norm_layer))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        feature_map = x
+        x = self.avgpool(x)
+        x = x.reshape(x.size(0), -1)
+        feature_vector = x
+        active_cls = self.fc_cls(x)
+        active_adv = self.fc_adv(x)
+
+        construction_learning = \
+            self.construction_learning_conv(feature_map)
+        construction_learning = \
+            self.construction_learning_relu(construction_learning)
+        construction_learning = \
+            self.construction_learning_pool(construction_learning)
+        return active_cls, active_adv, construction_learning
+
+
+class PilLoader():
+    def pil_loader(self, imgpath):
+        with open(imgpath, 'rb') as f:
+            with Image.open(f) as img:
+                return img.convert('RGB')
+
+
+class CUBBirdDataset(PilLoader):
+    def __init__(self, split=None, root=None):
+        if root is None:
+            root = 'dataset/CUB_200_2011'
+        image_list = pd.read_csv(
+            pjoin(root, 'images.txt'),
+            sep=' ',
+            header=None,
+            names=['image_id', 'image_name'],
+            index_col=0)
+        image_list = image_list.join(pd.read_csv(
+            pjoin(root, 'train_test_split.txt'),
+            sep=' ',
+            header=None,
+            names=['image_id', 'split'],
+            index_col=0))
+        image_list = image_list.join(pd.read_csv(
+            pjoin(root, 'image_class_labels.txt'),
+            sep=' ',
+            header=None,
+            names=['image_id', 'label'],
+            index_col=0))
+        if split is None:
+            split = 'train'
+        if split == 'train':
+            image_list = image_list[image_list.split == 1]
+        else:
+            image_list = image_list[image_list.split == 0]
+        self.image_list = image_list
+        self.root = root
+
+    def __getitem__(self, index):
+        if index >= len(self.image_list):
+            raise IndexError
+        row = self.image_list.iloc[index]
+        fname = pjoin(self.root, 'images', row.image_name)
+        image = cv2.imread(fname, cv2.IMREAD_COLOR)
+        if image is None:
+            raise Exception(f'cannot read file {fname}')
+        return image, row
+
+    def __len__(self):
+        return len(self.image_list)
+
+
+class TrainEvalDataset(Dataset):
+    def __init__(self, data_reader_class, N=7, k=2,
+                 augment=False, split='train', root=None):
+        super().__init__()
+        self.data_reader = data_reader_class(split=split, root=root)
+        self.N = N
+        self.k = k
+        self.transform = [
+            ResizeKeepAspectRatio(512),
+            RandomCrop(448),
+            ToFloat(),
+        ]
+        if augment:
+            self.transform += [
+                RandomNoise(),
+                RandFlip(),
+            ]
+        self.transform += [
+            ToTensor()
+        ]
+        self.transform = Compose(self.transform)
+
+    def _generate_random_perm(self):
+        original = np.mgrid[0:self.N, 0:self.N]
+        perm_row = ((np.random.rand(self.N)-0.5)*2*self.k +
+                    np.arange(self.N)).argsort()
+        perm_col = ((np.random.rand(self.N)-0.5)*2*self.k +
+                    np.arange(self.N)).argsort()
+
+        new_order = original.copy()
+        new_order[:, np.arange(self.N), :] = new_order[:, perm_row, :]
+        new_order[:, :, np.arange(self.N)] = new_order[:, :, perm_col]
+        original = original.astype(np.int32)
+        new_order = new_order.astype(np.int32)
+        return original, new_order
+
+    def swap(self, image):
+        original_matrix, swap_matrix = self._generate_random_perm()
+        stride = int(image.shape[0] / self.N)
+        new_img = image.copy()
+        for row, col in product(range(self.N), range(self.N)):
+            new_img[
+                row*stride:row*stride+stride,
+                col*stride:col*stride+stride, :] = image[
+                swap_matrix[0, row, col] *
+                    stride:swap_matrix[0, row, col]*stride+stride,
+                swap_matrix[1, row, col] *
+                    stride:swap_matrix[1, row, col]*stride+stride, :
+            ]
+        return new_img, swap_matrix, original_matrix
+
+    def __getitem__(self, index):
+        image, label = self.data_reader[index]
+        image = self.transform(image)
+        swaped_image, swap_matrix, original_matrix = self.swap(image)
+        original_matrix = (original_matrix / self.N).astype(np.float32)
+        swap_matrix = (swap_matrix / self.N).astype(np.float32)
+        return image, original_matrix,\
+            swaped_image, swap_matrix,\
+            label.label - 1
+
+    def __len__(self):
+        return self.data_reader.__len__()
+
+
+def train():
+    n_clsaa = 200
+    data = TrainEvalDataset(CUBBirdDataset, augment=True)
+    loader = DataLoader(data, 5, True, num_workers=6)
+    net = ResNet(num_classes=n_clsaa)
+    net = net.to(device)
+    optimizer = SGD(net.parameters(), 0.001, 0.9,)
+
+    storage_dict = SqliteDict('./runs/dcl_snap.db')
+    start_epoach = 0
+    if len(storage_dict) > 0:
+        kk = list(storage_dict.keys())
+        net.load_state_dict(
+            torch.load(BytesIO(storage_dict[kk[-1]])))
+        start_epoach = int(kk[-1]) + 1
+        logger.info(f'loading from epoach{start_epoach}')
+    global_step = 0
+    for epoach in tqdm(range(start_epoach, 100), total=100):
+        for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
+            image, matrix, swapped_image, swap_matrix, label = batch
+            label_adv = torch.LongTensor(
+                [0]*image.shape[0] + [1]*image.shape[0])
+            image = torch.cat((image, swapped_image), dim=0)
+            swap_matrix = torch.cat((matrix, swap_matrix), dim=0)
+            label = torch.cat((label, label), dim=0)
+
+            image = image.to(device)
+            swap_matrix = swap_matrix.to(device)
+            label = label.to(device)
+            label_adv = label_adv.to(device)
+
+            optimizer.zero_grad()
+            active_cls, active_adv, construction_learning = net(image)
+            loss_cls = 0.2 * nn.functional.cross_entropy(active_cls, label)
+            loss_adv = 1.0 * nn.functional.cross_entropy(active_adv, label_adv)
+            loss_ctl = 0.05 * nn.functional.l1_loss(construction_learning,
+                                                    swap_matrix)
+            # loss = loss_cls
+            loss = loss_cls + loss_adv + loss_ctl
+            loss.backward()
+            summery_writer.add_scalar(
+                'train/loss', loss.detach().cpu().numpy(), 
+                global_step=global_step
+            )
+            summery_writer.add_scalar(
+                'train/loss_cls', loss_cls.detach().cpu().numpy(),
+                global_step=global_step
+            )
+            summery_writer.add_scalar(
+                'train/loss_adv', loss_adv.detach().cpu().numpy(),
+                global_step=global_step
+            )
+            summery_writer.add_scalar(
+                'train/loss_ctl', loss_ctl.detach().cpu().numpy(),
+                global_step=global_step
+            )
+            global_step += 1
+        logger.debug(f'saving epoach {epoach}')
+        buffer = BytesIO()
+        torch.save(net.state_dict(), buffer)
+        buffer.seek(0)
+        storage_dict[epoach] = buffer.read()
+        storage_dict.commit()
+
+
+if __name__ == "__main__":
+    train()
+
+# ss = TrainEvalDataset(CUBBirdDataset())
+
+# img, swap_img, label = ss[4]
+# print(label)
+# plt.figure()
+# plt.imshow(img)
+# plt.figure()
+# plt.imshow(swap_img)
+# plt.show()
+
+# img, row = ss[5]
+# print(img.dtype)
+# resize = ResizeKeepAspectRatio(512)
+# crop = RandomCrop(448)
+# img = resize(img)
+# print(img.shape)
+# plt.figure()
+# plt.imshow(img)
+
+# for i in range(4):
+#     plt.figure()
+#     plt.imshow(crop(img))
+
+# plt.show()
+
+# random_sample = np.random.rand(1,3,448,448).astype(np.float32)
+# random_sample = torch.Tensor(random_sample)
+# xx = ResNet(num_classes=10)
+# out = xx(random_sample)
+# print(out)
