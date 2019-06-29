@@ -23,7 +23,7 @@ from tensorboardX import SummaryWriter
 from abc import ABC, abstractmethod
 import pandas as pd
 from PIL import Image, ImageEnhance, ImageOps
-import torchvision.models.resnet
+# import torchvision.models.resnet
 from util.augment import ResizeKeepAspectRatio, RandomCrop, Compose, \
     RandomNoise, RandFlip, ToTensor, ToFloat
 from itertools import product
@@ -209,13 +209,13 @@ class ResNet(nn.Module):
         x = self.avgpool(x)
         x = x.reshape(x.size(0), -1)
         feature_vector = x
-        active_cls = self.fc_cls(x)
-        active_adv = self.fc_adv(x)
+        active_cls = self.fc_cls(feature_vector)
+        active_adv = self.fc_adv(feature_vector)
 
         construction_learning = \
             self.construction_learning_conv(feature_map)
-        construction_learning = \
-            self.construction_learning_relu(construction_learning)
+        # construction_learning = \
+        #     self.construction_learning_relu(construction_learning)
         construction_learning = \
             self.construction_learning_pool(construction_learning)
         return active_cls, active_adv, construction_learning
@@ -338,13 +338,90 @@ class TrainEvalDataset(Dataset):
         return self.data_reader.__len__()
 
 
+def test(net, data_loader, epoach):
+    net.eval()
+    global_step = epoach * len(data_loader)
+    cls_predict, cls_gt = [], []
+    for batch_cnt, batch in enumerate(tqdm(data_loader)):
+        image, matrix, swapped_image, swap_matrix, label = batch
+        label_adv = torch.LongTensor([0]*image.shape[0])
+        image = (image)
+        swap_matrix = (matrix)
+        label = (label)
+
+        image = image.to(device)
+        swap_matrix = swap_matrix.to(device)
+        label = label.to(device)
+        label_adv = label_adv.to(device)
+
+        active_cls, active_adv, construction_learning = net(image)
+        loss_cls = 1.0 * nn.functional.cross_entropy(active_cls, label)
+        loss_adv = 1.0 * nn.functional.cross_entropy(active_adv, label_adv)
+        loss_ctl = 1.0 * nn.functional.l1_loss(construction_learning,
+                                               swap_matrix)
+        loss = loss_cls
+        # loss = loss_cls + loss_adv + loss_ctl
+        summery_writer.add_scalar(
+            'test/loss', loss.detach().cpu().numpy(),
+            global_step=global_step
+        )
+        summery_writer.add_scalar(
+            'test/loss_cls', loss_cls.detach().cpu().numpy(),
+            global_step=global_step
+        )
+        summery_writer.add_scalar(
+            'test/loss_adv', loss_adv.detach().cpu().numpy(),
+            global_step=global_step
+        )
+        summery_writer.add_scalar(
+            'test/loss_ctl', loss_ctl.detach().cpu().numpy(),
+            global_step=global_step
+        )
+        label = label.detach().cpu().numpy()
+        active_cls = active_cls.detach().cpu().numpy()
+        result_cls = np.argmax(active_cls, axis=1)
+        logger.debug(result_cls)
+        logger.debug(label)
+
+        active_adv = active_adv.detach().cpu().numpy()
+        result_adv = np.argmin(active_adv, axis=1)
+        label_adv = label_adv.detach().cpu().numpy()
+        logger.debug(result_adv)
+        logger.debug(label_adv)
+        logger.debug(construction_learning)
+        logger.debug(swap_matrix)
+        summery_writer.add_scalar(
+            'test/class_acc', np.mean(result_cls == label),
+            global_step=global_step
+        )
+        cls_gt += label.tolist()
+        cls_predict += result_cls.tolist()
+        summery_writer.add_scalar(
+            'test/class_adv', np.mean(result_adv == label_adv),
+            global_step=global_step
+        )
+        global_step += 1
+    cls_gt = np.array(cls_gt)
+    cls_predict = np.array(cls_predict)
+    summery_writer.add_scalar(
+        'test/acc_all',
+        np.mean(cls_gt == cls_predict),
+        epoach
+    )
+
+
 def train():
     n_clsaa = 200
     data = TrainEvalDataset(CUBBirdDataset, augment=True)
-    loader = DataLoader(data, 5, True, num_workers=6)
+    loader = DataLoader(data, 8, True, num_workers=12)
+    test_loader = DataLoader(
+        TrainEvalDataset(
+            CUBBirdDataset,
+            augment=False, split='test'),
+        8, True, num_workers=12)
     net = ResNet(num_classes=n_clsaa)
     net = net.to(device)
-    optimizer = SGD(net.parameters(), 0.001, 0.9,)
+    optimizer = SGD(net.parameters(), 0.01, 0.9,)
 
     storage_dict = SqliteDict('./runs/dcl_snap.db')
     start_epoach = 0
@@ -355,7 +432,8 @@ def train():
         start_epoach = int(kk[-1]) + 1
         logger.info(f'loading from epoach{start_epoach}')
     global_step = 0
-    for epoach in tqdm(range(start_epoach, 100), total=100):
+    for epoach in tqdm(range(start_epoach, 500), total=500):
+        net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
             image, matrix, swapped_image, swap_matrix, label = batch
             label_adv = torch.LongTensor(
@@ -371,15 +449,16 @@ def train():
 
             optimizer.zero_grad()
             active_cls, active_adv, construction_learning = net(image)
-            loss_cls = 0.2 * nn.functional.cross_entropy(active_cls, label)
+            loss_cls = 1.0 * nn.functional.cross_entropy(active_cls, label)
             loss_adv = 1.0 * nn.functional.cross_entropy(active_adv, label_adv)
-            loss_ctl = 0.05 * nn.functional.l1_loss(construction_learning,
-                                                    swap_matrix)
+            loss_ctl = 1.0 * nn.functional.l1_loss(construction_learning,
+                                                   swap_matrix)
             # loss = loss_cls
             loss = loss_cls + loss_adv + loss_ctl
             loss.backward()
+            optimizer.step()
             summery_writer.add_scalar(
-                'train/loss', loss.detach().cpu().numpy(), 
+                'train/loss', loss.detach().cpu().numpy(),
                 global_step=global_step
             )
             summery_writer.add_scalar(
@@ -394,6 +473,27 @@ def train():
                 'train/loss_ctl', loss_ctl.detach().cpu().numpy(),
                 global_step=global_step
             )
+            label = label.detach().cpu().numpy()
+            active_cls = active_cls.detach().cpu().numpy()
+            result_cls = np.argmax(active_cls, axis=1)
+            logger.debug(result_cls)
+            logger.debug(label)
+
+            active_adv = active_adv.detach().cpu().numpy()
+            result_adv = np.argmin(active_adv, axis=1)
+            label_adv = label_adv.detach().cpu().numpy()
+            logger.debug(result_adv)
+            logger.debug(label_adv)
+            logger.debug(construction_learning)
+            logger.debug(swap_matrix)
+            summery_writer.add_scalar(
+                'train/class_acc', np.mean(result_cls == label),
+                global_step=global_step
+            )
+            summery_writer.add_scalar(
+                'train/class_adv', np.mean(result_adv == label_adv),
+                global_step=global_step
+            )
             global_step += 1
         logger.debug(f'saving epoach {epoach}')
         buffer = BytesIO()
@@ -401,7 +501,7 @@ def train():
         buffer.seek(0)
         storage_dict[epoach] = buffer.read()
         storage_dict.commit()
-
+        test(net, test_loader, epoach)
 
 if __name__ == "__main__":
     train()
