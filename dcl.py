@@ -18,6 +18,7 @@ import sys
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import cv2
+from torch.optim import lr_scheduler
 
 from tensorboardX import SummaryWriter
 from abc import ABC, abstractmethod
@@ -166,8 +167,8 @@ class ResNet(nn.Module):
             for m in self.modules():
                 if isinstance(m, Bottleneck):
                     nn.init.constant_(m.bn3.weight, 0)
-                elif isinstance(m, BasicBlock):
-                    nn.init.constant_(m.bn2.weight, 0)
+                # elif isinstance(m, BasicBlock):
+                #     nn.init.constant_(m.bn2.weight, 0)
 
     def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
         norm_layer = self._norm_layer
@@ -214,8 +215,8 @@ class ResNet(nn.Module):
 
         construction_learning = \
             self.construction_learning_conv(feature_map)
-        # construction_learning = \
-        #     self.construction_learning_relu(construction_learning)
+        construction_learning = \
+            self.construction_learning_relu(construction_learning)
         construction_learning = \
             self.construction_learning_pool(construction_learning)
         return active_cls, active_adv, construction_learning
@@ -274,12 +275,12 @@ class CUBBirdDataset(PilLoader):
 
 
 class TrainEvalDataset(Dataset):
-    def __init__(self, data_reader_class, N=7, k=2,
+    def __init__(self, data_reader_class, N=7, __k=2,
                  augment=False, split='train', root=None):
         super().__init__()
         self.data_reader = data_reader_class(split=split, root=root)
         self.N = N
-        self.k = k
+        self.k = __k
         self.transform = [
             ResizeKeepAspectRatio(512),
             RandomCrop(448),
@@ -297,12 +298,12 @@ class TrainEvalDataset(Dataset):
 
     def _generate_random_perm(self):
         original = np.mgrid[0:self.N, 0:self.N]
+        new_order = np.mgrid[0:self.N, 0:self.N]
         perm_row = ((np.random.rand(self.N)-0.5)*2*self.k +
                     np.arange(self.N)).argsort()
         perm_col = ((np.random.rand(self.N)-0.5)*2*self.k +
                     np.arange(self.N)).argsort()
 
-        new_order = original.copy()
         new_order[:, np.arange(self.N), :] = new_order[:, perm_row, :]
         new_order[:, :, np.arange(self.N)] = new_order[:, :, perm_col]
         original = original.astype(np.int32)
@@ -311,16 +312,17 @@ class TrainEvalDataset(Dataset):
 
     def swap(self, image):
         original_matrix, swap_matrix = self._generate_random_perm()
-        stride = int(image.shape[0] / self.N)
-        new_img = image.copy()
+        stride = int(image.shape[1] / self.N)
+        new_img = np.zeros(image.shape, image.dtype)
         for row, col in product(range(self.N), range(self.N)):
+            n_row, n_col = swap_matrix[:, row, col]
             new_img[
-                row*stride:row*stride+stride,
-                col*stride:col*stride+stride, :] = image[
-                swap_matrix[0, row, col] *
-                    stride:swap_matrix[0, row, col]*stride+stride,
-                swap_matrix[1, row, col] *
-                    stride:swap_matrix[1, row, col]*stride+stride, :
+                :,
+                (row*stride):(row*stride+stride),
+                (col*stride):(col*stride+stride), ] = image[
+                :,
+                (n_row*stride):(n_row*stride+stride),
+                (n_col*stride):(n_col*stride+stride),
             ]
         return new_img, swap_matrix, original_matrix
 
@@ -328,8 +330,8 @@ class TrainEvalDataset(Dataset):
         image, label = self.data_reader[index]
         image = self.transform(image)
         swaped_image, swap_matrix, original_matrix = self.swap(image)
-        original_matrix = (original_matrix / self.N).astype(np.float32)
-        swap_matrix = (swap_matrix / self.N).astype(np.float32)
+        original_matrix = (original_matrix / 1).astype(np.float32)
+        swap_matrix = (swap_matrix / 1).astype(np.float32)
         return image, original_matrix,\
             swaped_image, swap_matrix,\
             label.label - 1
@@ -384,7 +386,7 @@ def test(net, data_loader, epoach):
         logger.debug(label)
 
         active_adv = active_adv.detach().cpu().numpy()
-        result_adv = np.argmin(active_adv, axis=1)
+        result_adv = np.argmax(active_adv, axis=1)
         label_adv = label_adv.detach().cpu().numpy()
         logger.debug(result_adv)
         logger.debug(label_adv)
@@ -412,6 +414,8 @@ def test(net, data_loader, epoach):
 
 def train():
     n_clsaa = 200
+    Learn_Swaped = True
+
     data = TrainEvalDataset(CUBBirdDataset, augment=True)
     loader = DataLoader(data, 8, True, num_workers=12)
     test_loader = DataLoader(
@@ -421,9 +425,31 @@ def train():
         8, True, num_workers=12)
     net = ResNet(num_classes=n_clsaa)
     net = net.to(device)
-    optimizer = SGD(net.parameters(), 0.01, 0.9,)
+    net = nn.DataParallel(net)
 
-    storage_dict = SqliteDict('./runs/dcl_snap.db')
+    ignored_params1 = list(map(id, net.module.fc_adv.parameters()))
+    ignored_params2 = list(map(id, net.module.fc_cls.parameters()))
+    ignored_params3 = list(
+        map(id, net.module.construction_learning_conv.parameters()))
+    ignored_params = ignored_params1 + ignored_params2 + ignored_params3
+    base_params = filter(
+        lambda p: id(p) not in ignored_params,
+        net.module.parameters())
+
+    base_lr = 0.001
+    lr_ratio = 10
+    learning_parametars = [
+        {'params': base_params},
+        {'params': net.module.fc_adv.parameters(), 'lr': lr_ratio*base_lr},
+        {'params': net.module.fc_cls.parameters(), 'lr': lr_ratio*base_lr},
+        {'params': net.module.construction_learning_conv.parameters(),
+            'lr': lr_ratio*base_lr},
+    ]
+    # optimizer = SGD(net.parameters(), 0.01, 0.9, weight_decay=0.01)
+    optimizer = Adam(learning_parametars, base_lr)
+    exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=60, gamma=0.1)
+
+    storage_dict = SqliteDict('./log/dcl_snap.db')
     start_epoach = 0
     if len(storage_dict) > 0:
         kk = list(storage_dict.keys())
@@ -436,27 +462,36 @@ def train():
         net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
             image, matrix, swapped_image, swap_matrix, label = batch
-            label_adv = torch.LongTensor(
-                [0]*image.shape[0] + [1]*image.shape[0])
-            image = torch.cat((image, swapped_image), dim=0)
-            swap_matrix = torch.cat((matrix, swap_matrix), dim=0)
-            label = torch.cat((label, label), dim=0)
+
+            if Learn_Swaped:
+                label_adv = torch.LongTensor(
+                    [0]*image.shape[0] + [1]*image.shape[0])
+                image = torch.cat((image, swapped_image), dim=0)
+                matrix = torch.cat((matrix, swap_matrix), dim=0)
+                label = torch.cat((label, label), dim=0)
+            else:
+                label_adv = torch.LongTensor(
+                    [0]*image.shape[0])
 
             image = image.to(device)
-            swap_matrix = swap_matrix.to(device)
+            matrix = matrix.to(device)
             label = label.to(device)
             label_adv = label_adv.to(device)
 
             optimizer.zero_grad()
-            active_cls, active_adv, construction_learning = net(image)
-            loss_cls = 1.0 * nn.functional.cross_entropy(active_cls, label)
-            loss_adv = 1.0 * nn.functional.cross_entropy(active_adv, label_adv)
-            loss_ctl = 1.0 * nn.functional.l1_loss(construction_learning,
-                                                   swap_matrix)
+            active_cls, active_adv, active_matrix = net(image)
+            loss_cls = 1.0 * (1-np.exp(-global_step * 0.001)) * \
+                nn.functional.cross_entropy(active_cls, label)
+            loss_adv = 1.0 * (1-np.exp(-global_step * 0.001)) * \
+                nn.functional.cross_entropy(active_adv, label_adv)
+            loss_ctl = 1.0 * (1-np.exp(-global_step * 0.001)) * \
+                nn.functional.l1_loss(active_matrix, matrix)
             # loss = loss_cls
             loss = loss_cls + loss_adv + loss_ctl
             loss.backward()
             optimizer.step()
+            exp_lr_scheduler.step()
+
             summery_writer.add_scalar(
                 'train/loss', loss.detach().cpu().numpy(),
                 global_step=global_step
@@ -476,24 +511,42 @@ def train():
             label = label.detach().cpu().numpy()
             active_cls = active_cls.detach().cpu().numpy()
             result_cls = np.argmax(active_cls, axis=1)
-            logger.debug(result_cls)
-            logger.debug(label)
+            # logger.debug(result_cls)
+            # logger.debug(label)
 
             active_adv = active_adv.detach().cpu().numpy()
-            result_adv = np.argmin(active_adv, axis=1)
+            result_adv = np.argmax(active_adv, axis=1)
             label_adv = label_adv.detach().cpu().numpy()
-            logger.debug(result_adv)
-            logger.debug(label_adv)
-            logger.debug(construction_learning)
-            logger.debug(swap_matrix)
+            # logger.debug(result_adv)
+            # logger.debug(label_adv)
+            # logger.debug(active_matrix)
+            # logger.debug(matrix)
             summery_writer.add_scalar(
                 'train/class_acc', np.mean(result_cls == label),
                 global_step=global_step
             )
             summery_writer.add_scalar(
-                'train/class_adv', np.mean(result_adv == label_adv),
+                'train/class_adv', np.mean((result_adv == label_adv)),
                 global_step=global_step
             )
+            # image = image.detach().cpu().numpy()
+            # figure = plt.figure()
+            # plt.imshow(image[-1,0,:,:])
+            # plt.colorbar()
+            # summery_writer.add_figure('train/image', figure, global_step)
+            # plt.close(figure)
+            # active_matrix = active_matrix.detach().cpu().numpy()
+            # matrix = matrix.detach().cpu().numpy()
+            # figure = plt.figure()
+            # plt.imshow(active_matrix[-1, 0, :, :])
+            # plt.colorbar()
+            # summery_writer.add_figure('train/result_ctl', figure, global_step)
+            # plt.close(figure)
+            # figure = plt.figure()
+            # plt.imshow(matrix[-1, 0, :, :])
+            # plt.colorbar()
+            # summery_writer.add_figure('train/label_ctl', figure, global_step)
+            # plt.close(figure)
             global_step += 1
         logger.debug(f'saving epoach {epoach}')
         buffer = BytesIO()
@@ -506,14 +559,15 @@ def train():
 if __name__ == "__main__":
     train()
 
-# ss = TrainEvalDataset(CUBBirdDataset())
+# ss = TrainEvalDataset(CUBBirdDataset)
 
-# img, swap_img, label = ss[4]
+# image, original_matrix, swaped_image, swap_matrix, label = ss[4]
 # print(label)
+# plt.figure('matrix')
+# plt.imshow(swap_matrix[0,:,:])
+# plt.colorbar()
 # plt.figure()
-# plt.imshow(img)
-# plt.figure()
-# plt.imshow(swap_img)
+# plt.imshow(swaped_image[0,:,:])
 # plt.show()
 
 # img, row = ss[5]
