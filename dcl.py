@@ -26,7 +26,7 @@ import pandas as pd
 from PIL import Image, ImageEnhance, ImageOps
 # import torchvision.models.resnet
 from util.augment import ResizeKeepAspectRatio, RandomCrop, Compose, \
-    RandomNoise, RandFlip, ToTensor, ToFloat
+    RandomNoise, RandFlip, ToTensor, ToFloat, GlobalNorm
 from itertools import product
 from sqlitedict import SqliteDict
 from io import BytesIO
