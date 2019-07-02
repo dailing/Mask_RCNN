@@ -492,8 +492,9 @@ def calculate_loss(
     if test:
         ratio = 1
     else:
-        # ratio = 1
-        ratio = (1-np.exp(-global_step * 0.001))
+        ratio = 1
+        # ratio = (1-np.exp(-global_step * 0.001))
+        # ratio = (1/(1 + np.exp(-global_step / 4000 * 20 + 10)))
     loss_cls = 1.0 * ratio * \
         nn.functional.cross_entropy(active_cls, label)
     loss_adv = 1.0 * ratio * \
@@ -604,17 +605,19 @@ def train():
     lr_ratio = 10
 
     def lr_policy(step):
+        if step < 20:
+            return 0.01 * 1.259 ** step
         return 0.3 ** (step // 100)
 
-    learning_parametars = [
-        {'params': base_params},
-        {'params': net.module.fc_adv.parameters(), 'lr': lr_ratio*0.1},
-        {'params': net.module.fc_cls.parameters(), 'lr': lr_ratio*base_lr},
-        {'params': net.module.construction_learning_conv.parameters(),
-            'lr': lr_ratio*0.1},
-    ]
+    # learning_parametars = [
+    #     {'params': base_params},
+    #     {'params': net.module.fc_adv.parameters(), 'lr': 0.1*base_lr},
+    #     {'params': net.module.fc_cls.parameters(), 'lr': lr_ratio*base_lr},
+    #     {'params': net.module.construction_learning_conv.parameters(),
+    #         'lr': 0.1*base_lr},
+    # ]
     # optimizer = SGD(net.parameters(), 0.01, 0.9, weight_decay=0.01)
-    optimizer = Adam(learning_parametars, base_lr)
+    optimizer = Adam(net.parameters(), base_lr)
     exp_lr_scheduler = lr_scheduler.LambdaLR(optimizer, lr_policy)
 
     storage_dict = SqliteDict('./log/dcl_snap.db')
