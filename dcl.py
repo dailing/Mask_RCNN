@@ -19,6 +19,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import cv2
 from torch.optim import lr_scheduler
+from util.process_pool import MongoFileReader
 
 from tensorboardX import SummaryWriter
 from abc import ABC, abstractmethod
@@ -26,13 +27,15 @@ import pandas as pd
 from PIL import Image, ImageEnhance, ImageOps
 # import torchvision.models.resnet
 from util.augment import ResizeKeepAspectRatio, RandomCrop, Compose, \
-    RandomNoise, RandFlip, ToTensor, ToFloat, GlobalNorm
+    RandomNoise, RandFlip, ToTensor, ToFloat, GlobalNorm, FundusAOICrop,\
+    Resize
 from itertools import product
 from sqlitedict import SqliteDict
 from io import BytesIO
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
-# import Optional
+# import ray
+# ray.init('localhost:6379')
 
 logger = get_logger('fff')
 summery_writer = SummaryWriter(logdir='log/dcl_log')
@@ -374,6 +377,49 @@ class PilLoader():
                 return img.convert('RGB')
 
 
+class DRDataset(PilLoader):
+    def __init__(self, split=None, root=None):
+        self.reader = None
+        if split is None:
+            split = 'train'
+        self.split = split
+        label_file = {
+            'train': 'dataset/grade/trainLabels.csv',
+            'test': 'dataset/grade/retinopathy_solution.csv',
+        }
+        # self.cache = SqliteDict('log/drcache.db')
+        self.files = pd.read_csv(label_file[split])
+        self.files.columns = ('image', 'label', *self.files.columns[2:])
+        self.files.label += 1
+        self.transform = Compose(
+            (FundusAOICrop(), Resize(512))
+        )
+
+    def __getitem__(self, index):
+        if self.reader is None:
+            self.reader = SqliteDict('dataset/kaggle.db')
+        if index >= len(self.files):
+            raise IndexError
+        row = self.files.iloc[index]
+        fname = row.image
+        # if fname in self.cache:
+        #     return self.cache[fname]
+        file_content = self.reader[fname]
+        if file_content is None:
+            raise Exception(f'file {fname} not found')
+        # file_content = BytesIO(file_content)
+        img = cv2.imdecode(
+            np.frombuffer(file_content, np.uint8),
+            cv2.IMREAD_COLOR)
+        img = self.transform(img)
+        # self.cache[fname] = (img, row)
+        # self.cache.commit()
+        return img, row
+
+    def __len__(self):
+        return len(self.files)
+
+
 class CUBBirdDataset(PilLoader):
     def __init__(self, split=None, root=None):
         if root is None:
@@ -492,8 +538,8 @@ def calculate_loss(
     if test:
         ratio = 1
     else:
-        ratio = 1
-        # ratio = (1-np.exp(-global_step * 0.001))
+        # ratio = 1
+        ratio = (1-np.exp(-global_step * 0.001))
         # ratio = (1/(1 + np.exp(-global_step / 4000 * 20 + 10)))
     loss_cls = 1.0 * ratio * \
         nn.functional.cross_entropy(active_cls, label)
@@ -547,16 +593,16 @@ def test(net, data_loader, epoach):
         label = label.detach().cpu().numpy()
         active_cls = active_cls.detach().cpu().numpy()
         result_cls = np.argmax(active_cls, axis=1)
-        logger.debug(result_cls)
-        logger.debug(label)
+        # logger.debug(result_cls)
+        # logger.debug(label)
 
         active_adv = active_adv.detach().cpu().numpy()
         result_adv = np.argmax(active_adv, axis=1)
         label_adv = label_adv.detach().cpu().numpy()
-        logger.debug(result_adv)
-        logger.debug(label_adv)
-        logger.debug(active_matrix)
-        logger.debug(matrix)
+        # logger.debug(result_adv)
+        # logger.debug(label_adv)
+        # logger.debug(active_matrix)
+        # logger.debug(matrix)
         summery_writer.add_scalar(
             'test/class_acc', np.mean(result_cls == label),
             global_step=global_step
@@ -578,16 +624,16 @@ def test(net, data_loader, epoach):
 
 
 def train():
-    n_clsaa = 200
+    n_clsaa = 5
     Learn_Swaped = True
 
-    data = TrainEvalDataset(CUBBirdDataset, augment=True)
-    loader = DataLoader(data, 8, True, num_workers=12)
+    data = TrainEvalDataset(DRDataset, augment=True)
+    loader = DataLoader(data, 2, True, num_workers=12)
     test_loader = DataLoader(
         TrainEvalDataset(
-            CUBBirdDataset,
+            DRDataset,
             augment=False, split='test'),
-        8, True, num_workers=12)
+        2, True, num_workers=12)
     net = ResNet(num_classes=n_clsaa)
     net = net.to(device)
     net = nn.DataParallel(net)
@@ -601,23 +647,23 @@ def train():
         lambda p: id(p) not in ignored_params,
         net.module.parameters())
 
-    base_lr = 0.1
+    base_lr = 0.01
     lr_ratio = 10
 
     def lr_policy(step):
         if step < 20:
             return 0.01 * 1.259 ** step
-        return 0.3 ** (step // 100)
+        return 0.3 ** (step // 200)
 
-    # learning_parametars = [
-    #     {'params': base_params},
-    #     {'params': net.module.fc_adv.parameters(), 'lr': 0.1*base_lr},
-    #     {'params': net.module.fc_cls.parameters(), 'lr': lr_ratio*base_lr},
-    #     {'params': net.module.construction_learning_conv.parameters(),
-    #         'lr': 0.1*base_lr},
-    # ]
+    learning_parametars = [
+        {'params': base_params},
+        {'params': net.module.fc_adv.parameters(), 'lr': 0.1*base_lr},
+        {'params': net.module.fc_cls.parameters(), 'lr': lr_ratio*base_lr},
+        {'params': net.module.construction_learning_conv.parameters(),
+            'lr': 0.1*base_lr},
+    ]
     # optimizer = SGD(net.parameters(), 0.01, 0.9, weight_decay=0.01)
-    optimizer = Adam(net.parameters(), base_lr)
+    optimizer = Adam(learning_parametars, base_lr)
     exp_lr_scheduler = lr_scheduler.LambdaLR(optimizer, lr_policy)
 
     storage_dict = SqliteDict('./log/dcl_snap.db')
@@ -633,7 +679,7 @@ def train():
         net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
             image, matrix, swapped_image, swap_matrix, label = batch
-
+            logger.info(label)
             if Learn_Swaped:
                 label_adv = torch.LongTensor(
                     [0]*image.shape[0] + [1]*image.shape[0])

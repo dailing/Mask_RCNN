@@ -1,0 +1,33 @@
+version: "3.7"
+
+networks: 
+  mongos:
+    external: true
+
+
+services: 
+  train_dcl:
+    image: ray
+    shm_size: 24000M
+    networks: 
+      - mongos
+      - default
+    volumes: 
+      - .:/workspace:ro
+      - ./log:/workspace/log
+      - ~/data:/workspace/dataset
+    command: ipython dcl.py train
+
+  jupyter:
+    image: ray
+    shm_size: 24000M
+    networks: 
+      - mongos
+      - default
+    ports: 
+      - 8888:8888
+    volumes: 
+      - .:/workspace
+      - ./log:/workspace/log
+      - ~/data:/workspace/dataset
+    command: jupyter lab --ip 0.0.0.0 --allow-root
