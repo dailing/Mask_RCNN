@@ -1,41 +1,32 @@
+import random
+from io import BytesIO
+from itertools import product
+from os.path import join as pjoin
+
+import cv2
 import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from PIL import Image
+from sqlitedict import SqliteDict
+from tensorboardX import SummaryWriter
 from torch.optim import Adam, SGD
+from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from util.process_pool import run_once
-from util.logs import get_logger
-from PIL import Image
-import torch.nn.functional as F
-from abc import ABC, abstractmethod
-import torch
-import pickle
-from os.path import join as pjoin
-from os.path import exists
-from os import makedirs
-from hashlib import md5
-import shutil
-import sys
-import torch.nn as nn
-import matplotlib.pyplot as plt
-import cv2
-from torch.optim import lr_scheduler
-from util.process_pool import MongoFileReader
+from torchvision.models import Inception3
 
-from tensorboardX import SummaryWriter
-from abc import ABC, abstractmethod
-import pandas as pd
-from PIL import Image, ImageEnhance, ImageOps
-# import torchvision.models.resnet
-from util.augment import ResizeKeepAspectRatio, RandomCrop, Compose, \
-    RandomNoise, RandFlip, ToTensor, ToFloat, GlobalNorm, FundusAOICrop,\
-    Resize
-from itertools import product
-from sqlitedict import SqliteDict
-from io import BytesIO
-from tensorboardX import SummaryWriter
-from tqdm import tqdm
-# import ray
-# ray.init('localhost:6379')
+# def tqdm(arg, **kwargs):
+#     return arg
+
+import util.tasks
+from util.augment import ResizeKeepAspectRatio, Compose, \
+    RandomNoise, RandFlip, ToTensor, ToFloat, FundusAOICrop, \
+    Resize, RandRotate, RangeCenter, RandomCrop
+from util.logs import get_logger
+
 
 logger = get_logger('fff')
 summery_writer = SummaryWriter(logdir='log/dcl_log')
@@ -56,150 +47,6 @@ def conv1x1(in_planes, out_planes, stride=1):
                      kernel_size=1, stride=stride, bias=False)
 
 
-# def one_hot(labels: torch.Tensor,
-#             num_classes: int,
-#             device: Optional[torch.device] = None,
-#             dtype: Optional[torch.dtype] = None,
-#             eps: Optional[float] = 1e-6) -> torch.Tensor:
-#     r"""
-#     Converts an integer label 2D tensor to a one-hot 3D tensor.
-#     code from :
-#     https://torchgeometry.readthedocs.io/en/latest/_modules/kornia/utils/one_hot.html
-
-#     Args:
-#         labels (torch.Tensor) : tensor with labels of shape :math:`(N, H, W)`,
-#                                 where N is batch siz. Each value is an integer
-#                                 representing correct classification.
-#         num_classes (int): number of classes in labels.
-#         device (Optional[torch.device]): the desired device of returned tensor.
-#          Default: if None, uses the current device for the default tensor type
-#          (see torch.set_default_tensor_type()). device will be the CPU for CPU
-#          tensor types and the current CUDA device for CUDA tensor types.
-#         dtype (Optional[torch.dtype]): the desired data type of returned
-#          tensor. Default: if None, infers data type from values.
-
-#     Returns:
-#         torch.Tensor: the labels in one hot tensor.
-
-#     Examples::
-#         >>> labels = torch.LongTensor([[[0, 1], [2, 0]]])
-#         >>> kornia.losses.one_hot(labels, num_classes=3)
-#         tensor([[[[1., 0.],
-#                   [0., 1.]],
-#                  [[0., 1.],
-#                   [0., 0.]],
-#                  [[0., 0.],
-#                   [1., 0.]]]]
-#     """
-#     if not torch.is_tensor(labels):
-#         raise TypeError("Input labels type is not a torch.Tensor. Got {}"
-#                         .format(type(labels)))
-#     if not len(labels.shape) == 3:
-#         raise ValueError("Invalid depth shape, we expect BxHxW. Got: {}"
-#                          .format(labels.shape))
-#     if not labels.dtype == torch.int64:
-#         raise ValueError(
-#             "labels must be of the same dtype torch.int64. Got: {}" .format(
-#                 labels.dtype))
-#     if num_classes < 1:
-#         raise ValueError("The number of classes must be bigger than one."
-#                          " Got: {}".format(num_classes))
-#     batch_size, height, width = labels.shape
-#     one_hot = torch.zeros(batch_size, num_classes, height, width,
-#                           device=device, dtype=dtype)
-#     return one_hot.scatter_(1, labels.unsqueeze(1), 1.0) + eps
-
-
-# class FocalLoss(nn.Module):
-#     r"""Criterion that computes Focal loss.
-#     code from https://torchgeometry.readthedocs.io/en/latest/_modules/kornia/losses/focal.html#focal_loss
-
-#     According to [1], the Focal loss is computed as follows:
-
-#     .. math::
-
-#         \text{FL}(p_t) = -\alpha_t (1 - p_t)^{\gamma} \, \text{log}(p_t)
-
-#     where:
-#        - :math:`p_t` is the model's estimated probability for each class.
-
-
-#     Arguments:
-#         alpha (float): Weighting factor :math:`\alpha \in [0, 1]`.
-#         gamma (float): Focusing parameter :math:`\gamma >= 0`.
-#         reduction (Optional[str]): Specifies the reduction to apply to the
-#          output: ‘none’ | ‘mean’ | ‘sum’. ‘none’: no reduction will be applied,
-#          ‘mean’: the sum of the output will be divided by the number of elements
-#          in the output, ‘sum’: the output will be summed. Default: ‘none’.
-
-#     Shape:
-#         - Input: :math:`(N, C, H, W)` where C = number of classes.
-#         - Target: :math:`(N, H, W)` where each value is
-#           :math:`0 ≤ targets[i] ≤ C−1`.
-
-#     Examples:
-#         >>> N = 5  # num_classes
-#         >>> args = {"alpha": 0.5, "gamma": 2.0, "reduction": 'mean'}
-#         >>> loss = kornia.losses.FocalLoss(*args)
-#         >>> input = torch.randn(1, N, 3, 5, requires_grad=True)
-#         >>> target = torch.empty(1, 3, 5, dtype=torch.long).random_(N)
-#         >>> output = loss(input, target)
-#         >>> output.backward()
-
-#     References:
-#         [1] https://arxiv.org/abs/1708.02002
-#     """
-
-#     def __init__(self, alpha: float, gamma: Optional[float] = 2.0,
-#                  reduction: Optional[str] = 'none') -> None:
-#         super(FocalLoss, self).__init__()
-#         self.alpha: float = alpha
-#         self.gamma: torch.Tensor = torch.tensor(gamma)
-#         self.reduction: Optional[str] = reduction
-#         self.eps: float = 1e-6
-
-#     def forward(  # type: ignore
-#             self,
-#             input: torch.Tensor,
-#             target: torch.Tensor) -> torch.Tensor:
-#         if not torch.is_tensor(input):
-#             raise TypeError("Input type is not a torch.Tensor. Got {}"
-#                             .format(type(input)))
-#         if not len(input.shape) == 4:
-#             raise ValueError("Invalid input shape, we expect BxNxHxW. Got: {}"
-#                              .format(input.shape))
-#         if not input.shape[-2:] == target.shape[-2:]:
-#             raise ValueError("input and target shapes must be the same. Got: {}"
-#                              .format(input.shape, input.shape))
-#         if not input.device == target.device:
-#             raise ValueError(
-#                 "input and target must be in the same device. Got: {}" .format(
-#                     input.device, target.device))
-#         # compute softmax over the classes axis
-#         input_soft = F.softmax(input, dim=1) + self.eps
-
-#         # create the labels one hot tensor
-#         target_one_hot = one_hot(target, num_classes=input.shape[1],
-#                                  device=input.device, dtype=input.dtype)
-
-#         # compute the actual focal loss
-#         weight = torch.pow(torch.tensor(1.) - input_soft,
-#                            self.gamma.to(input.dtype))
-#         focal = -self.alpha * weight * torch.log(input_soft)
-#         loss_tmp = torch.sum(target_one_hot * focal, dim=1)
-
-#         if self.reduction == 'none':
-#             loss = loss_tmp
-#         elif self.reduction == 'mean':
-#             loss = torch.mean(loss_tmp)
-#         elif self.reduction == 'sum':
-#             loss = torch.sum(loss_tmp)
-#         else:
-#             raise NotImplementedError("Invalid reduction mode: {}"
-#                                       .format(self.reduction))
-#         return loss
-
-
 class Bottleneck(nn.Module):
     expansion = 4
 
@@ -209,8 +56,6 @@ class Bottleneck(nn.Module):
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         width = int(planes * (base_width / 64.)) * groups
-        # Both self.conv2 and self.downsample
-        # layers downsample the input when stride != 1
         self.conv1 = conv1x1(inplanes, width)
         self.bn1 = norm_layer(width)
         self.conv2 = conv3x3(width, width, stride, groups, dilation)
@@ -247,10 +92,10 @@ class Bottleneck(nn.Module):
 class ResNet(nn.Module):
 
     def __init__(self, num_classes=1000,
-                 zero_init_residual=False,
                  groups=1, width_per_group=64,
                  replace_stride_with_dilation=None,
-                 norm_layer=None):
+                 norm_layer=None,
+                 with_regression=False):
         super(ResNet, self).__init__()
         layers = [3, 4, 6, 3]
         block = Bottleneck
@@ -290,6 +135,10 @@ class ResNet(nn.Module):
 
         self.fc_cls = nn.Linear(512 * block.expansion, num_classes)
         self.fc_adv = nn.Linear(512 * block.expansion, 2)
+        self.with_regression = with_regression
+        if self.with_regression:
+            self.fc_regression = nn.Linear(512 * block.expansion, 1)
+        self.fc_threshold = nn.Linear(512*block.expansion, 5)
 
         # construction learning
         self.construction_learning_conv = nn.Conv2d(
@@ -297,26 +146,6 @@ class ResNet(nn.Module):
         self.construction_learning_relu = nn.ReLU()
         self.construction_learning_pool = \
             nn.AdaptiveAvgPool2d((self.N, self.N))
-
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(
-                    m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-        # Zero-initialize the last BN in each residual branch,
-        # so that the residual branch starts with zeros,
-        # and each residual block behaves like an identity.
-        # This improves the model by 0.2~0.3%
-        # according to https://arxiv.org/abs/1706.02677
-        if zero_init_residual:
-            for m in self.modules():
-                if isinstance(m, Bottleneck):
-                    nn.init.constant_(m.bn3.weight, 0)
-                # elif isinstance(m, BasicBlock):
-                #     nn.init.constant_(m.bn2.weight, 0)
 
     def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
         norm_layer = self._norm_layer
@@ -358,19 +187,25 @@ class ResNet(nn.Module):
         x = self.avgpool(x)
         x = x.reshape(x.size(0), -1)
         feature_vector = x
-        active_cls = self.fc_cls(feature_vector)
-        active_adv = self.fc_adv(feature_vector)
+        results = {}
 
+        results['cls'] = self.fc_cls(feature_vector)
+        results['adv'] = self.fc_adv(feature_vector)
         construction_learning = \
             self.construction_learning_conv(feature_map)
         construction_learning = \
             self.construction_learning_relu(construction_learning)
         construction_learning = \
             self.construction_learning_pool(construction_learning)
-        return active_cls, active_adv, construction_learning
+        results['ctl'] = construction_learning
+        results['reg'] = None
+        results['threshold'] = self.fc_threshold(feature_vector)
+        if self.with_regression:
+            results['reg'] = self.fc_regression(feature_vector)
+        return results
 
 
-class PilLoader():
+class PilLoader:
     def pil_loader(self, imgpath):
         with open(imgpath, 'rb') as f:
             with Image.open(f) as img:
@@ -390,31 +225,69 @@ class DRDataset(PilLoader):
         # self.cache = SqliteDict('log/drcache.db')
         self.files = pd.read_csv(label_file[split])
         self.files.columns = ('image', 'label', *self.files.columns[2:])
-        self.files.label += 1
+        # self.files.label
         self.transform = Compose(
-            (FundusAOICrop(), Resize(512))
+            (FundusAOICrop(), Resize(224))
         )
+        self.files_by_level = [
+            self.files[self.files.label == i] for i in range(5)
+        ]
+        self.length = len(self.files)
 
     def __getitem__(self, index):
-        if self.reader is None:
-            self.reader = SqliteDict('dataset/kaggle.db')
-        if index >= len(self.files):
+        if index >= self.length:
             raise IndexError
-        row = self.files.iloc[index]
-        fname = row.image
-        # if fname in self.cache:
-        #     return self.cache[fname]
-        file_content = self.reader[fname]
+        if self.split == 'train':
+            level = index % 5
+            index_in_level = random.randint(0, len(self.files_by_level[level])-1)
+            row = self.files_by_level[level].iloc[index_in_level]
+        else:
+            row = self.files.iloc[index]
+        fname = f'/share/kaggke_dr/{row.image}'
+        file_content = open(fname, 'rb').read()
         if file_content is None:
             raise Exception(f'file {fname} not found')
-        # file_content = BytesIO(file_content)
         img = cv2.imdecode(
             np.frombuffer(file_content, np.uint8),
             cv2.IMREAD_COLOR)
         img = self.transform(img)
+        return img, row
+
+    def __len__(self):
+        return self.length
+
+
+class DRDatasetRemote(PilLoader):
+    def __init__(self, split=None):
+        self.reader = None
+        if split is None:
+            split = 'train'
+        self.split = split
+        label_file = {
+            'train': 'dataset/grade/trainLabels.csv',
+            'test': 'dataset/grade/retinopathy_solution.csv',
+        }
+        # self.cache = SqliteDict('log/drcache.db')
+        self.files = pd.read_csv(label_file[split])
+        # self.files.columns = ('image', 'label', *self.files.columns[2:])
+        self.remote_task = None
+
+    def __getitem__(self, index):
+        if self.remote_task is None:
+            self.remote_task = tasks.Task(
+                task_name='get_file',
+                redis_host='192.168.3.40',
+                redis_port=16379,
+            )
+        if index >= len(self.files):
+            raise IndexError
+        row = self.files.iloc[index]
+        resp = self.remote_task.issue(row)
+        # if fname in self.cache:
+        #     return self.cache[fname]
         # self.cache[fname] = (img, row)
         # self.cache.commit()
-        return img, row
+        return resp.get()
 
     def __len__(self):
         return len(self.files)
@@ -473,14 +346,16 @@ class TrainEvalDataset(Dataset):
         self.N = N
         self.k = __k
         self.transform = [
-            ResizeKeepAspectRatio(512),
-            RandomCrop(448),
+            # Resize(224),
+            # RandomCrop(448),
             ToFloat(),
+            RangeCenter()
         ]
         if augment:
             self.transform += [
-                RandomNoise(),
+                # RandomNoise(),
                 RandFlip(),
+                RandRotate(),
             ]
         self.transform += [
             ToTensor()
@@ -525,38 +400,49 @@ class TrainEvalDataset(Dataset):
         swap_matrix = (swap_matrix / 1).astype(np.float32)
         return image, original_matrix,\
             swaped_image, swap_matrix,\
-            label.label - 1
+            label.label
 
     def __len__(self):
         return self.data_reader.__len__()
 
 
 def calculate_loss(
-        matrix, label, label_adv,
-        active_cls, active_adv, active_matrix, global_step,
-        test=False):
-    if test:
-        ratio = 1
+        net_out,
+        label=None, matrix=None, label_adv=None,
+        global_step=None,
+        learn_swapped=True):
+    active_cls = net_out['cls']
+    active_adv = net_out['adv']
+    active_reg = net_out['reg']
+    active_matrix = net_out['ctl']
+    activa_th = net_out['threshold']
+    loss_cls = nn.functional.cross_entropy(active_cls, label)
+    if learn_swapped:
+        loss_adv = nn.functional.cross_entropy(active_adv, label_adv)
+        loss_ctl = nn.functional.l1_loss(active_matrix, matrix)
+        loss = loss_cls + loss_adv + loss_ctl
+        loss_ctl = loss_ctl.detach().cpu().numpy()
+        loss_adv = loss_adv.detach().cpu().numpy()
+        loss_cls = loss_cls.detach().cpu().numpy()
     else:
-        # ratio = 1
-        ratio = (1-np.exp(-global_step * 0.001))
-        # ratio = (1/(1 + np.exp(-global_step / 4000 * 20 + 10)))
-    loss_cls = 1.0 * ratio * \
-        nn.functional.cross_entropy(active_cls, label)
-    loss_adv = 1.0 * ratio * \
-        nn.functional.cross_entropy(active_adv, label_adv)
-    loss_ctl = 1.0 * ratio * \
-        nn.functional.l1_loss(active_matrix, matrix)
-    # loss = loss_cls
-    loss = loss_cls + loss_adv + loss_ctl
+        loss = loss_cls
+        loss_adv = 0
+        loss_ctl = 0
+    if active_reg is not None:
+        loss_reg = nn.functional.smooth_l1_loss(active_reg, label.float().view_as(active_reg))
+        loss += loss_reg
+        loss_reg = loss_reg.detach().cpu().numpy()
+    else:
+        loss_reg = 0
+    if activa_th is not None:
+        _, yv = torch.meshgrid([torch.arange(0,label.shape[0]), torch.arange(0, 5)])
+        yv = yv.to(device)
+        label_th = torch.stack([label] * 5, dim=1)
+        label_th = (label_th > yv).float()
+        loss_threshold = nn.functional.binary_cross_entropy_with_logits(activa_th,label_th)
     return loss, dict(loss=loss, loss_cls=loss_cls,
-                      loss_adv=loss_adv, loss_ctl=loss_ctl)
-
-
-def calculate_matrix(
-        matrix, label, label_adv,
-        active_cls, active_adv, active_matrix):
-    pass
+                      loss_adv=loss_adv, loss_ctl=loss_ctl,
+                      loss_reg=loss_reg, loss_threshold=loss_threshold)
 
 
 def test(net, data_loader, epoach):
@@ -575,34 +461,36 @@ def test(net, data_loader, epoach):
         label = label.to(device)
         label_adv = label_adv.to(device)
 
-        active_cls, active_adv, active_matrix = net(image)
-        # loss_cls = 1.0 * nn.functional.cross_entropy(active_cls, label)
-        # loss_adv = 1.0 * nn.functional.cross_entropy(active_adv, label_adv)
-        # loss_ctl = 1.0 * nn.functional.l1_loss(active_matrix,
-        #                                        swap_matrix)
-        # loss = loss_cls
-        # loss = loss_cls + loss_adv + loss_ctl
-        loss, loss_dict = calculate_loss(matrix, label, label_adv,
-                                         active_cls, active_adv, active_matrix,
-                                         global_step, test=True)
+        net_out = net(image)
+        active_cls, active_adv, active_matrix = net_out['cls'], net_out['adv'], net_out['ctl']
+        active_th = net_out['threshold']
+        active_reg = net_out['reg']
+
+        loss, loss_dict = calculate_loss(
+            net_out,
+            label=label,
+            matrix=matrix,
+            label_adv=label_adv)
+
         for name, loss_val in loss_dict.items():
             summery_writer.add_scalar(
-                f'test/{name}', loss_val.detach().cpu().numpy(),
+                f'test/{name}', loss_val,
                 global_step=global_step
             )
         label = label.detach().cpu().numpy()
         active_cls = active_cls.detach().cpu().numpy()
         result_cls = np.argmax(active_cls, axis=1)
-        # logger.debug(result_cls)
-        # logger.debug(label)
 
         active_adv = active_adv.detach().cpu().numpy()
         result_adv = np.argmax(active_adv, axis=1)
         label_adv = label_adv.detach().cpu().numpy()
-        # logger.debug(result_adv)
-        # logger.debug(label_adv)
-        # logger.debug(active_matrix)
-        # logger.debug(matrix)
+        active_th = active_th.detach().cpu().numpy()
+        active_th = 1. / (1. + np.exp(-active_th))
+        active_th = active_th > 0.5
+        label_th = np.stack([label] * 5, axis=1)
+        for i in range(5):
+            label_th[:, i] = label_th[:, i] > i
+        acc_th = np.mean(active_th == label_th, axis=0)
         summery_writer.add_scalar(
             'test/class_acc', np.mean(result_cls == label),
             global_step=global_step
@@ -613,6 +501,17 @@ def test(net, data_loader, epoach):
             'test/class_adv', np.mean(result_adv == label_adv),
             global_step=global_step
         )
+        if active_reg is not None:
+            active_reg = np.round(active_reg.detach().cpu().numpy())
+            summery_writer.add_scalar(
+                'test/class_reg_acc', np.mean(active_reg == label),
+                global_step=global_step
+            )
+        summery_writer.add_scalars(
+            'test/bin_classification_acc',
+            {f'acc_{i}': acc_th[i] for i in range(5)},
+            global_step=global_step
+        )
         global_step += 1
     cls_gt = np.array(cls_gt)
     cls_predict = np.array(cls_predict)
@@ -621,34 +520,39 @@ def test(net, data_loader, epoach):
         np.mean(cls_gt == cls_predict),
         epoach
     )
+    # summery_writer.add_scalar(
+    #     'test/f1',
+    #     sklearn
+    # )
 
 
+# noinspection PyArgumentList
 def train():
-    n_clsaa = 5
-    Learn_Swaped = True
+    n_clsaa = 6
+    Learn_Swaped = False
+    with_regresion = True
 
-    data = TrainEvalDataset(DRDataset, augment=True)
-    loader = DataLoader(data, 2, True, num_workers=12)
+    loader = DataLoader(
+        TrainEvalDataset(DRDataset, split='train', augment=True), 32, True, num_workers=20)
     test_loader = DataLoader(
-        TrainEvalDataset(
-            DRDataset,
-            augment=False, split='test'),
-        2, True, num_workers=12)
-    net = ResNet(num_classes=n_clsaa)
+        TrainEvalDataset(DRDataset, split='test'), 32, True, num_workers=20)
+    net = ResNet(num_classes=n_clsaa, with_regression=with_regresion)
+    net.load_state_dict(torch.load('runs/resnet50-19c8e357.pth'), strict=False)
     net = net.to(device)
     net = nn.DataParallel(net)
 
     ignored_params1 = list(map(id, net.module.fc_adv.parameters()))
     ignored_params2 = list(map(id, net.module.fc_cls.parameters()))
-    ignored_params3 = list(
+    ignored_params3 = list(map(id, net.module.fc_regression.parameters()))
+    ignored_params4 = list(
         map(id, net.module.construction_learning_conv.parameters()))
-    ignored_params = ignored_params1 + ignored_params2 + ignored_params3
+    ignored_params = ignored_params1 + ignored_params2 + ignored_params3 + ignored_params4
     base_params = filter(
         lambda p: id(p) not in ignored_params,
         net.module.parameters())
 
     base_lr = 0.01
-    lr_ratio = 10
+    lr_ratio = 1
 
     def lr_policy(step):
         if step < 20:
@@ -657,14 +561,15 @@ def train():
 
     learning_parametars = [
         {'params': base_params},
-        {'params': net.module.fc_adv.parameters(), 'lr': 0.1*base_lr},
         {'params': net.module.fc_cls.parameters(), 'lr': lr_ratio*base_lr},
+        {'params': net.module.fc_regression.parameters(), 'lr': 0.1*base_lr},
+        {'params': net.module.fc_adv.parameters(), 'lr': 0.1*base_lr},
         {'params': net.module.construction_learning_conv.parameters(),
             'lr': 0.1*base_lr},
     ]
-    # optimizer = SGD(net.parameters(), 0.01, 0.9, weight_decay=0.01)
-    optimizer = Adam(learning_parametars, base_lr)
-    exp_lr_scheduler = lr_scheduler.LambdaLR(optimizer, lr_policy)
+    optimizer = SGD(net.parameters(), 0.01, 0.9)
+    # optimizer = Adam(learning_parametars, base_lr)
+    exp_lr_scheduler = lr_scheduler.ExponentialLR(optimizer, 0.97)
 
     storage_dict = SqliteDict('./log/dcl_snap.db')
     start_epoach = 0
@@ -675,11 +580,10 @@ def train():
         start_epoach = int(kk[-1]) + 1
         logger.info(f'loading from epoach{start_epoach}')
     global_step = 0
-    for epoach in tqdm(range(start_epoach, 500), total=500):
+    for epoach in (range(start_epoach, 500)):
         net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
             image, matrix, swapped_image, swap_matrix, label = batch
-            logger.info(label)
             if Learn_Swaped:
                 label_adv = torch.LongTensor(
                     [0]*image.shape[0] + [1]*image.shape[0])
@@ -688,41 +592,59 @@ def train():
                 label = torch.cat((label, label), dim=0)
             else:
                 label_adv = torch.LongTensor(
-                    [0]*image.shape[0])
+                    [0] * image.shape[0])
 
             image = image.to(device)
-            matrix = matrix.to(device)
             label = label.to(device)
+            matrix = matrix.to(device)
             label_adv = label_adv.to(device)
 
             optimizer.zero_grad()
-            active_cls, active_adv, active_matrix = net(image)
-            loss, loss_dict = \
-                calculate_loss(matrix, label, label_adv,
-                               active_cls, active_adv, active_matrix,
-                               global_step)
+
+            net_out = net(image)
+            active_cls, active_adv, active_matrix = net_out['cls'], net_out['adv'], net_out['ctl']
+            active_th = net_out['threshold']
+            active_reg = net_out['reg']
+
+            loss, loss_dict = calculate_loss(
+                net_out,
+                label=label,
+                matrix=matrix,
+                label_adv=label_adv,
+                learn_swapped=Learn_Swaped)
 
             loss.backward()
             optimizer.step()
 
             for name, loss_val in loss_dict.items():
                 summery_writer.add_scalar(
-                    f'train/{name}', loss_val.detach().cpu().numpy(),
+                    f'train/{name}', loss_val,
                     global_step=global_step
                 )
             label = label.detach().cpu().numpy()
             active_cls = active_cls.detach().cpu().numpy()
             result_cls = np.argmax(active_cls, axis=1)
-            # logger.debug(result_cls)
-            # logger.debug(label)
 
             active_adv = active_adv.detach().cpu().numpy()
             result_adv = np.argmax(active_adv, axis=1)
             label_adv = label_adv.detach().cpu().numpy()
-            # logger.debug(result_adv)
-            # logger.debug(label_adv)
-            # logger.debug(active_matrix)
-            # logger.debug(matrix)
+            active_th = active_th.detach().cpu().numpy()
+            active_th = 1. / (1. + np.exp(-active_th))
+            active_th = active_th > 0.5
+            label_th = np.stack([label] * 5, axis=1)
+            # logger.info(label_th)
+            for i in range(5):
+                label_th[:,i] = label_th[:,i] > i
+            # logger.info(label_th)
+            # logger.info(active_th)
+            # logger.info(label_th == active_th)
+            acc_th = np.mean(active_th==label_th, axis=0)
+            if active_reg is not None:
+                active_reg = np.round(active_reg.detach().cpu().numpy())
+                summery_writer.add_scalar(
+                    'train/class_reg_acc', np.mean(active_reg == label),
+                    global_step=global_step
+                )
             summery_writer.add_scalar(
                 'train/class_acc', np.mean(result_cls == label),
                 global_step=global_step
@@ -731,26 +653,13 @@ def train():
                 'train/class_adv', np.mean((result_adv == label_adv)),
                 global_step=global_step
             )
-            # image = image.detach().cpu().numpy()
-            # figure = plt.figure()
-            # plt.imshow(image[-1,0,:,:])
-            # plt.colorbar()
-            # summery_writer.add_figure('train/image', figure, global_step)
-            # plt.close(figure)
-            # active_matrix = active_matrix.detach().cpu().numpy()
-            # matrix = matrix.detach().cpu().numpy()
-            # figure = plt.figure()
-            # plt.imshow(active_matrix[-1, 0, :, :])
-            # plt.colorbar()
-            # summery_writer.add_figure('train/result_ctl', figure, global_step)
-            # plt.close(figure)
-            # figure = plt.figure()
-            # plt.imshow(matrix[-1, 0, :, :])
-            # plt.colorbar()
-            # summery_writer.add_figure('train/label_ctl', figure, global_step)
-            # plt.close(figure)
+            summery_writer.add_scalars(
+                'train/bin_classification_acc',
+                {f'acc_{i}': acc_th[i] for i in range(5)},
+                global_step=global_step
+            )
             global_step += 1
-        exp_lr_scheduler.step()
+        exp_lr_scheduler.step(epoach)
         logger.debug(f'saving epoach {epoach}')
         buffer = BytesIO()
         torch.save(net.state_dict(), buffer)
@@ -761,35 +670,3 @@ def train():
 
 if __name__ == "__main__":
     train()
-
-# ss = TrainEvalDataset(CUBBirdDataset)
-
-# image, original_matrix, swaped_image, swap_matrix, label = ss[4]
-# print(label)
-# plt.figure('matrix')
-# plt.imshow(swap_matrix[0,:,:])
-# plt.colorbar()
-# plt.figure()
-# plt.imshow(swaped_image[0,:,:])
-# plt.show()
-
-# img, row = ss[5]
-# print(img.dtype)
-# resize = ResizeKeepAspectRatio(512)
-# crop = RandomCrop(448)
-# img = resize(img)
-# print(img.shape)
-# plt.figure()
-# plt.imshow(img)
-
-# for i in range(4):
-#     plt.figure()
-#     plt.imshow(crop(img))
-
-# plt.show()
-
-# random_sample = np.random.rand(1,3,448,448).astype(np.float32)
-# random_sample = torch.Tensor(random_sample)
-# xx = ResNet(num_classes=10)
-# out = xx(random_sample)
-# print(out)

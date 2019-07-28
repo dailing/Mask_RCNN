@@ -31,3 +31,12 @@ services:
       - ./log:/workspace/log
       - ~/data:/workspace/dataset
     command: jupyter lab --ip 0.0.0.0 --allow-root
+
+  tensorboard:
+    image: ray
+    shm_size: 24000M
+    ports: 
+      -  6006:6006
+    volumes: 
+      - ./log:/workspace/log:ro
+    command: tensorboard --logdir .
