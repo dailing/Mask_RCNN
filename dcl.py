@@ -226,9 +226,9 @@ class DRDataset(PilLoader):
         self.files = pd.read_csv(label_file[split])
         self.files.columns = ('image', 'label', *self.files.columns[2:])
         # self.files.label
-        self.transform = Compose(
-            (FundusAOICrop(), Resize(224))
-        )
+        # self.transform = Compose(
+        #     (FundusAOICrop(), Resize(224))
+        # )
         self.files_by_level = [
             self.files[self.files.label == i] for i in range(5)
         ]
@@ -243,14 +243,14 @@ class DRDataset(PilLoader):
             row = self.files_by_level[level].iloc[index_in_level]
         else:
             row = self.files.iloc[index]
-        fname = f'/share/kaggke_dr/{row.image}'
+        fname = f'/share/small_pic/kaggle_dr@448/{row.image}'
         file_content = open(fname, 'rb').read()
         if file_content is None:
             raise Exception(f'file {fname} not found')
         img = cv2.imdecode(
             np.frombuffer(file_content, np.uint8),
             cv2.IMREAD_COLOR)
-        img = self.transform(img)
+        # img = self.transform(img)
         return img, row
 
     def __len__(self):
@@ -340,11 +340,12 @@ class CUBBirdDataset(PilLoader):
 
 class TrainEvalDataset(Dataset):
     def __init__(self, data_reader_class, N=7, __k=2,
-                 augment=False, split='train', root=None):
+                 augment=False, split='train', root=None, swap=False):
         super().__init__()
         self.data_reader = data_reader_class(split=split, root=root)
         self.N = N
         self.k = __k
+        self.swap_img = swap
         self.transform = [
             # Resize(224),
             # RandomCrop(448),
@@ -395,9 +396,14 @@ class TrainEvalDataset(Dataset):
     def __getitem__(self, index):
         image, label = self.data_reader[index]
         image = self.transform(image)
-        swaped_image, swap_matrix, original_matrix = self.swap(image)
-        original_matrix = (original_matrix / 1).astype(np.float32)
-        swap_matrix = (swap_matrix / 1).astype(np.float32)
+        if self.swap_img:
+            swaped_image, swap_matrix, original_matrix = self.swap(image)
+            original_matrix = (original_matrix / 1).astype(np.float32)
+            swap_matrix = (swap_matrix / 1).astype(np.float32)
+        else:
+            swaped_image, swap_matrix, original_matrix = 0, 0, 0
+            original_matrix = 0
+            swap_matrix = 0
         return image, original_matrix,\
             swaped_image, swap_matrix,\
             label.label
@@ -462,7 +468,7 @@ def test(net, data_loader, epoach):
         label_adv = label_adv.to(device)
 
         net_out = net(image)
-        active_cls, active_adv, active_matrix = net_out['cls'], net_out['adv'], net_out['ctl']
+        active_cls = net_out['cls']
         active_th = net_out['threshold']
         active_reg = net_out['reg']
 
@@ -470,7 +476,7 @@ def test(net, data_loader, epoach):
             net_out,
             label=label,
             matrix=matrix,
-            label_adv=label_adv)
+            label_adv=label_adv, learn_swapped=False)
 
         for name, loss_val in loss_dict.items():
             summery_writer.add_scalar(
@@ -481,9 +487,9 @@ def test(net, data_loader, epoach):
         active_cls = active_cls.detach().cpu().numpy()
         result_cls = np.argmax(active_cls, axis=1)
 
-        active_adv = active_adv.detach().cpu().numpy()
-        result_adv = np.argmax(active_adv, axis=1)
-        label_adv = label_adv.detach().cpu().numpy()
+        # active_adv = active_adv.detach().cpu().numpy()
+        # result_adv = np.argmax(active_adv, axis=1)
+        # label_adv = label_adv.detach().cpu().numpy()
         active_th = active_th.detach().cpu().numpy()
         active_th = 1. / (1. + np.exp(-active_th))
         active_th = active_th > 0.5
@@ -497,10 +503,10 @@ def test(net, data_loader, epoach):
         )
         cls_gt += label.tolist()
         cls_predict += result_cls.tolist()
-        summery_writer.add_scalar(
-            'test/class_adv', np.mean(result_adv == label_adv),
-            global_step=global_step
-        )
+        # summery_writer.add_scalar(
+        #     'test/class_adv', np.mean(result_adv == label_adv),
+        #     global_step=global_step
+        # )
         if active_reg is not None:
             active_reg = np.round(active_reg.detach().cpu().numpy())
             summery_writer.add_scalar(
@@ -533,9 +539,10 @@ def train():
     with_regresion = True
 
     loader = DataLoader(
-        TrainEvalDataset(DRDataset, split='train', augment=True), 32, True, num_workers=20)
+        TrainEvalDataset(DRDataset, split='train', augment=True, swap=True),
+        10, True, num_workers=20)
     test_loader = DataLoader(
-        TrainEvalDataset(DRDataset, split='test'), 32, True, num_workers=20)
+        TrainEvalDataset(DRDataset, split='test'), 10, True, num_workers=20)
     net = ResNet(num_classes=n_clsaa, with_regression=with_regresion)
     net.load_state_dict(torch.load('runs/resnet50-19c8e357.pth'), strict=False)
     net = net.to(device)
