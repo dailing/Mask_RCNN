@@ -137,8 +137,12 @@ class ResNet(nn.Module):
         self.fc_adv = nn.Linear(512 * block.expansion, 2)
         self.with_regression = with_regression
         if self.with_regression:
-            self.fc_regression = nn.Linear(512 * block.expansion, 1)
-        self.fc_threshold = nn.Linear(512*block.expansion, 5)
+            self.fc_regression = nn.Sequential(
+                nn.Linear(512 * block.expansion, 128),
+                nn.Linear(128, 1))
+        self.fc_threshold = nn.Sequential(
+            nn.Linear(512*block.expansion, 128),
+            nn.Linear(128,5))
 
         # construction learning
         self.construction_learning_conv = nn.Conv2d(
@@ -535,7 +539,7 @@ def test(net, data_loader, epoach):
 # noinspection PyArgumentList
 def train():
     n_clsaa = 6
-    Learn_Swaped = False
+    Learn_Swaped = True
     with_regresion = True
 
     loader = DataLoader(
