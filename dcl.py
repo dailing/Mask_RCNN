@@ -16,16 +16,13 @@ from torch.optim import Adam, SGD
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from torchvision.models import Inception3
+from util.tasks import MServiceInstance, Task
 
-# def tqdm(arg, **kwargs):
-#     return arg
-
-import util.tasks
 from util.augment import ResizeKeepAspectRatio, Compose, \
     RandomNoise, RandFlip, ToTensor, ToFloat, FundusAOICrop, \
     Resize, RandRotate, RangeCenter, RandomCrop
 from util.logs import get_logger
+from scipy.special import softmax
 
 
 logger = get_logger('fff')
@@ -274,7 +271,7 @@ class DRDatasetRemote(PilLoader):
 
     def __getitem__(self, index):
         if self.remote_task is None:
-            self.remote_task = tasks.Task(
+            self.remote_task = Task(
                 task_name='get_file',
                 redis_host='192.168.3.40',
                 redis_port=16379,
@@ -673,7 +670,61 @@ def train():
         buffer.seek(0)
         storage_dict[epoach] = buffer.read()
         storage_dict.commit()
-        test(net, test_loader, epoach)
+        #test(net, test_loader, epoach)
+
+
+class Predictor(MServiceInstance):
+    def init_env(self):
+        net = ResNet(num_classes=6, with_regression=True)
+        net = nn.DataParallel(net)
+        net.load_state_dict(torch.load(self.snap_file))
+        self.transform = Compose((
+            FundusAOICrop(),
+            Resize(448),
+            ToFloat(),
+            RangeCenter(),
+            ToTensor()
+        ))
+        self.net = net
+        self.net.eval()
+
+    def __call__(self, arg):
+        if self.net is None:
+            self.init_env()
+        if type(arg) is np.ndarray:
+            arg = (arg,)
+        elif type(arg) in (list, tuple):
+            pass
+        else:
+            logger.error(f'FUCK the arg is {type(arg)}')
+        result = []
+        for img in arg:
+            img = self.transform(img)
+            img = img[np.newaxis,:,:,:]
+            img = torch.Tensor(img)
+            net_result = self.net(img)
+            rr = net_result['reg'].detach().cpu().numpy().item()
+            cls = net_result['cls'].detach().cpu().numpy()
+            logger.info(rr)
+            logger.info(cls)
+            result.append(dict(
+                level=round(rr),
+                raw=rr,
+                prob=softmax(cls).tolist()
+            ))
+            return result
+
+
+
+    def __init__(self, snap_file='snap.pkl'):
+        self.transform = None
+        self.snap_file = snap_file
+        self.net = None
+
+
 
 if __name__ == "__main__":
     train()
+    pp = Predictor()
+    pp.init_env()
+
