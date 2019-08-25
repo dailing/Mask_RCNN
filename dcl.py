@@ -17,6 +17,7 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from util.tasks import MServiceInstance, Task
+from util.config import Configure
 
 from util.augment import ResizeKeepAspectRatio, Compose, \
     RandomNoise, RandFlip, ToTensor, ToFloat, FundusAOICrop, \
@@ -88,11 +89,11 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, num_classes=1000,
-                 groups=1, width_per_group=64,
-                 replace_stride_with_dilation=None,
-                 norm_layer=None,
-                 with_regression=False):
+    def __init__(self, config):
+        self.config = config
+        replace_stride_with_dilation = config.replace_stride_with_dilation
+        norm_layer = config.norm_layer
+
         super(ResNet, self).__init__()
         layers = [3, 4, 6, 3]
         block = Bottleneck
@@ -112,8 +113,7 @@ class ResNet(nn.Module):
             raise ValueError(f"replace_stride_with_dilation should be None "
                              "or a 3-element tuple, got"
                              " {replace_stride_with_dilation}")
-        self.groups = groups
-        self.base_width = width_per_group
+        self.base_width = config.width_per_group
         self.conv1 = nn.Conv2d(
             3, self.inplanes, kernel_size=7, stride=2,
             padding=3, bias=False)
@@ -130,10 +130,9 @@ class ResNet(nn.Module):
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
-        self.fc_cls = nn.Linear(512 * block.expansion, num_classes)
+        self.fc_cls = nn.Linear(512 * block.expansion, self.config.num_classes)
         self.fc_adv = nn.Linear(512 * block.expansion, 2)
-        self.with_regression = with_regression
-        if self.with_regression:
+        if self.config.with_regression:
             self.fc_regression = nn.Linear(512 * block.expansion, 1)
         self.fc_threshold = nn.Linear(512*block.expansion, 5)
 
@@ -159,12 +158,12 @@ class ResNet(nn.Module):
 
         layers = []
         layers.append(block(
-            self.inplanes, planes, stride, downsample, self.groups,
+            self.inplanes, planes, stride, downsample, self.config.groups,
             self.base_width, previous_dilation, norm_layer))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(
-                self.inplanes, planes, groups=self.groups,
+                self.inplanes, planes, groups=self.config.groups,
                 base_width=self.base_width, dilation=self.dilation,
                 norm_layer=norm_layer))
 
@@ -197,7 +196,7 @@ class ResNet(nn.Module):
         results['ctl'] = construction_learning
         results['reg'] = None
         results['threshold'] = self.fc_threshold(feature_vector)
-        if self.with_regression:
+        if self.config.with_regression:
             results['reg'] = self.fc_regression(feature_vector)
         return results
 
@@ -236,7 +235,8 @@ class DRDataset(PilLoader):
             raise IndexError
         if self.split == 'train':
             level = index % 5
-            index_in_level = random.randint(0, len(self.files_by_level[level])-1)
+            index_in_level = random.randint(
+                0, len(self.files_by_level[level])-1)
             row = self.files_by_level[level].iloc[index_in_level]
         else:
             row = self.files.iloc[index]
@@ -432,17 +432,20 @@ def calculate_loss(
         loss_adv = 0
         loss_ctl = 0
     if active_reg is not None:
-        loss_reg = nn.functional.smooth_l1_loss(active_reg, label.float().view_as(active_reg))
+        loss_reg = nn.functional.smooth_l1_loss(
+            active_reg, label.float().view_as(active_reg))
         loss += loss_reg
         loss_reg = loss_reg.detach().cpu().numpy()
     else:
         loss_reg = 0
     if activa_th is not None:
-        _, yv = torch.meshgrid([torch.arange(0,label.shape[0]), torch.arange(0, 5)])
+        _, yv = torch.meshgrid(
+            [torch.arange(0, label.shape[0]), torch.arange(0, 5)])
         yv = yv.to(device)
         label_th = torch.stack([label] * 5, dim=1)
         label_th = (label_th > yv).float()
-        loss_threshold = nn.functional.binary_cross_entropy_with_logits(activa_th,label_th)
+        loss_threshold = nn.functional.binary_cross_entropy_with_logits(
+            activa_th, label_th)
     return loss, dict(loss=loss, loss_cls=loss_cls,
                       loss_adv=loss_adv, loss_ctl=loss_ctl,
                       loss_reg=loss_reg, loss_threshold=loss_threshold)
@@ -530,27 +533,29 @@ def test(net, data_loader, epoach):
 
 
 # noinspection PyArgumentList
-def train():
+def train(config):
     n_clsaa = 6
     Learn_Swaped = False
-    with_regresion = True
 
     loader = DataLoader(
-        TrainEvalDataset(DRDataset, split='train', augment=True, swap=True),
-        10, True, num_workers=20)
+        TrainEvalDataset(
+            config.dataset, split='train', augment=True, swap=True),
+        config.batch_size, True, num_workers=12)
     test_loader = DataLoader(
-        TrainEvalDataset(DRDataset, split='test'), 10, True, num_workers=20)
-    net = ResNet(num_classes=n_clsaa, with_regression=with_regresion)
+        TrainEvalDataset(config.dataset, split='test'),
+        config.batch_size, False, num_workers=12)
+    net = ResNet(config.net)
     net.load_state_dict(torch.load('runs/resnet50-19c8e357.pth'), strict=False)
     net = net.to(device)
     net = nn.DataParallel(net)
 
-    ignored_params1 = list(map(id, net.module.fc_adv.parameters()))
-    ignored_params2 = list(map(id, net.module.fc_cls.parameters()))
-    ignored_params3 = list(map(id, net.module.fc_regression.parameters()))
-    ignored_params4 = list(
+    ignored_params = list(map(id, net.module.fc_adv.parameters()))
+    ignored_params += list(map(id, net.module.fc_cls.parameters()))
+    if config.net.with_regression:
+        ignored_params += list(map(id, net.module.fc_regression.parameters()))
+    ignored_params += list(
         map(id, net.module.construction_learning_conv.parameters()))
-    ignored_params = ignored_params1 + ignored_params2 + ignored_params3 + ignored_params4
+
     base_params = filter(
         lambda p: id(p) not in ignored_params,
         net.module.parameters())
@@ -566,11 +571,14 @@ def train():
     learning_parametars = [
         {'params': base_params},
         {'params': net.module.fc_cls.parameters(), 'lr': lr_ratio*base_lr},
-        {'params': net.module.fc_regression.parameters(), 'lr': 0.1*base_lr},
         {'params': net.module.fc_adv.parameters(), 'lr': 0.1*base_lr},
         {'params': net.module.construction_learning_conv.parameters(),
             'lr': 0.1*base_lr},
     ]
+    if config.net.with_regression:
+        learning_parametars.append(
+            {'params': net.module.fc_regression.parameters(),
+             'lr': 0.1*base_lr})
     optimizer = SGD(net.parameters(), 0.01, 0.9)
     # optimizer = Adam(learning_parametars, base_lr)
     exp_lr_scheduler = lr_scheduler.ExponentialLR(optimizer, 0.97)
@@ -606,7 +614,8 @@ def train():
             optimizer.zero_grad()
 
             net_out = net(image)
-            active_cls, active_adv, active_matrix = net_out['cls'], net_out['adv'], net_out['ctl']
+            active_cls, active_adv, active_matrix = net_out['cls'],\
+                net_out['adv'], net_out['ctl']
             active_th = net_out['threshold']
             active_reg = net_out['reg']
 
@@ -638,11 +647,11 @@ def train():
             label_th = np.stack([label] * 5, axis=1)
             # logger.info(label_th)
             for i in range(5):
-                label_th[:,i] = label_th[:,i] > i
+                label_th[:, i] = label_th[:, i] > i
             # logger.info(label_th)
             # logger.info(active_th)
             # logger.info(label_th == active_th)
-            acc_th = np.mean(active_th==label_th, axis=0)
+            acc_th = np.mean(active_th == label_th, axis=0)
             if active_reg is not None:
                 active_reg = np.round(active_reg.detach().cpu().numpy())
                 summery_writer.add_scalar(
@@ -670,7 +679,7 @@ def train():
         buffer.seek(0)
         storage_dict[epoach] = buffer.read()
         storage_dict.commit()
-        #test(net, test_loader, epoach)
+        test(net, test_loader, epoach)
 
 
 class Predictor(MServiceInstance):
@@ -700,7 +709,7 @@ class Predictor(MServiceInstance):
         result = []
         for img in arg:
             img = self.transform(img)
-            img = img[np.newaxis,:,:,:]
+            img = img[np.newaxis, :, :, :]
             img = torch.Tensor(img)
             net_result = self.net(img)
             rr = net_result['reg'].detach().cpu().numpy().item()
@@ -714,17 +723,32 @@ class Predictor(MServiceInstance):
             ))
             return result
 
-
-
     def __init__(self, snap_file='snap.pkl'):
         self.transform = None
         self.snap_file = snap_file
         self.net = None
 
 
+def get_configure():
+    cfg = Configure()
+    cfg.\
+        add_mapping('dataset', dict(
+            kaggle_dr=DRDataset,
+            bird=CUBBirdDataset,
+        ), default_value='kaggle_dr').\
+        add('batch_size', 10)
+    cfg.add_subconfigure('net').\
+        add('num_classes', 6).\
+        add('groups', 1).\
+        add('width_per_group', 64).\
+        add('replace_stride_with_dilation', None).\
+        add('norm_layer', None).\
+        add('with_regression', False)
+    return cfg
 
 if __name__ == "__main__":
-    train()
+    config = get_configure()
+    print(config.to_yaml())
+    train(config)
     pp = Predictor()
     pp.init_env()
-
