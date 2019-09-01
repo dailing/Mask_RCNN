@@ -24,11 +24,12 @@ from util.augment import ResizeKeepAspectRatio, Compose, \
     Resize, RandRotate, RangeCenter, RandomCrop
 from util.logs import get_logger
 from scipy.special import softmax
+import sys
+from pasnet import PNASNet5Large
+from inceptionv4 import InceptionV4
 
 
 logger = get_logger('fff')
-summery_writer = SummaryWriter(logdir='log/dcl_log')
-
 device = torch.device('cuda')
 
 
@@ -89,10 +90,14 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, config):
-        self.config = config
-        replace_stride_with_dilation = config.replace_stride_with_dilation
-        norm_layer = config.norm_layer
+    def __init__(
+            self,
+            num_classes=6,
+            groups=1,
+            width_per_group=64,
+            replace_stride_with_dilation=None,
+            norm_layer=None,
+            with_regression=False):
 
         super(ResNet, self).__init__()
         layers = [3, 4, 6, 3]
@@ -100,6 +105,8 @@ class ResNet(nn.Module):
         self.overall_stride = 32
         self.input_width = 448
         self.N = 7
+        self.with_regression = with_regression
+        self.groups = groups
 
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -113,7 +120,7 @@ class ResNet(nn.Module):
             raise ValueError(f"replace_stride_with_dilation should be None "
                              "or a 3-element tuple, got"
                              " {replace_stride_with_dilation}")
-        self.base_width = config.width_per_group
+        self.base_width = width_per_group
         self.conv1 = nn.Conv2d(
             3, self.inplanes, kernel_size=7, stride=2,
             padding=3, bias=False)
@@ -130,13 +137,6 @@ class ResNet(nn.Module):
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
-        self.fc_cls = nn.Linear(512 * block.expansion, self.config.num_classes)
-        self.fc_adv = nn.Linear(512 * block.expansion, 2)
-        if self.config.with_regression:
-            self.fc_regression = nn.Linear(512 * block.expansion, 1)
-        self.fc_threshold = nn.Linear(512*block.expansion, 5)
-
-        # construction learning
         self.construction_learning_conv = nn.Conv2d(
             512*block.expansion, 2, kernel_size=1, stride=1)
         self.construction_learning_relu = nn.ReLU()
@@ -158,12 +158,12 @@ class ResNet(nn.Module):
 
         layers = []
         layers.append(block(
-            self.inplanes, planes, stride, downsample, self.config.groups,
+            self.inplanes, planes, stride, downsample, self.groups,
             self.base_width, previous_dilation, norm_layer))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(
-                self.inplanes, planes, groups=self.config.groups,
+                self.inplanes, planes, groups=self.groups,
                 base_width=self.base_width, dilation=self.dilation,
                 norm_layer=norm_layer))
 
@@ -183,22 +183,34 @@ class ResNet(nn.Module):
         x = self.avgpool(x)
         x = x.reshape(x.size(0), -1)
         feature_vector = x
-        results = {}
+        results = dict(feature_map=feature_map, feature=feature_vector)
 
-        results['cls'] = self.fc_cls(feature_vector)
-        results['adv'] = self.fc_adv(feature_vector)
-        construction_learning = \
-            self.construction_learning_conv(feature_map)
-        construction_learning = \
-            self.construction_learning_relu(construction_learning)
-        construction_learning = \
-            self.construction_learning_pool(construction_learning)
-        results['ctl'] = construction_learning
-        results['reg'] = None
-        results['threshold'] = self.fc_threshold(feature_vector)
-        if self.config.with_regression:
-            results['reg'] = self.fc_regression(feature_vector)
         return results
+
+
+class NetModel(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        if config.net_parameters is None:
+            config.net_parameters = {}
+        self.base_net = config.basenet(**config.net_parameters)
+        self.config = config
+        for i in self.config.outputs:
+            logger.info(f'{i.layer_parameters}')
+            layer = i.model(**i.layer_parameters)
+            self.__setattr__(i.name_output, layer)
+
+    def forward(self, x):
+        values = self.base_net(x)
+        outputs = {}
+        for i in self.config.outputs:
+            layer = self.__getattr__(i.name_output)
+            assert i.name_input in values, \
+                f'require {i.name_input}, has {list(values.keys())}'
+            out = layer(values[i.name_input])
+            values[i.name_output] = out
+            outputs[i.name_output] = out
+        return outputs
 
 
 class PilLoader:
@@ -218,15 +230,10 @@ class DRDataset(PilLoader):
             'train': 'dataset/grade/trainLabels.csv',
             'test': 'dataset/grade/retinopathy_solution.csv',
         }
-        # self.cache = SqliteDict('log/drcache.db')
         self.files = pd.read_csv(label_file[split])
-        self.files.columns = ('image', 'label', *self.files.columns[2:])
-        # self.files.label
-        # self.transform = Compose(
-        #     (FundusAOICrop(), Resize(224))
-        # )
+        self.files.columns = ('image', *self.files.columns[1:])
         self.files_by_level = [
-            self.files[self.files.label == i] for i in range(5)
+            self.files[self.files.level == i] for i in range(5)
         ]
         self.length = len(self.files)
 
@@ -248,7 +255,7 @@ class DRDataset(PilLoader):
             np.frombuffer(file_content, np.uint8),
             cv2.IMREAD_COLOR)
         # img = self.transform(img)
-        return img, row
+        return img, row.to_dict()
 
     def __len__(self):
         return self.length
@@ -329,31 +336,70 @@ class CUBBirdDataset(PilLoader):
         image = cv2.imread(fname, cv2.IMREAD_COLOR)
         if image is None:
             raise Exception(f'cannot read file {fname}')
-        return image, row
+        return image, row.to_dict()
+
+    def __len__(self):
+        return len(self.image_list)
+
+
+class RubbishDataset(PilLoader):
+    def __init__(
+            self, split=None, root=None,
+            test_split=None, csv_file='label_with_split.csv'):
+        if root is None:
+            root = '../dataset'
+        image_list = pd.read_csv(
+            pjoin(root, f'{root}/{csv_file}'))
+        image_list.sample()
+        if split is None:
+            split = 'train'
+        if split == 'train':
+            image_list = image_list[image_list.split != test_split]
+        else:
+            image_list = image_list[image_list.split == test_split]
+        self.image_list = image_list
+        self.root = root
+
+    def __getitem__(self, index):
+        if index >= len(self.image_list):
+            raise IndexError
+        row = self.image_list.iloc[index]
+        # logger.info(row)
+        fname = pjoin(self.root, row.image)
+        image = np.array(Image.open(open(fname, 'rb')))
+        if len(image.shape) < 2:
+            return self.__getitem__(index-1)
+        if len(image.shape) != 3:
+            image = np.stack((image, image, image), axis=2)
+        image = image[:, :, :3]
+        if image is None:
+            raise Exception(f'cannot read file {fname}')
+        return image, row.to_dict()
 
     def __len__(self):
         return len(self.image_list)
 
 
 class TrainEvalDataset(Dataset):
-    def __init__(self, data_reader_class, N=7, __k=2,
+    def __init__(self, data_reader, config, N=7, __k=2,
                  augment=False, split='train', root=None, swap=False):
         super().__init__()
-        self.data_reader = data_reader_class(split=split, root=root)
+        self.config = config
+        self.data_reader = data_reader
         self.N = N
         self.k = __k
         self.swap_img = swap
         self.transform = [
-            # Resize(224),
-            # RandomCrop(448),
+            ResizeKeepAspectRatio(int(self.config.input_size * 1.2)),
+            RandomCrop(self.config.input_size),
             ToFloat(),
             RangeCenter()
         ]
-        if augment:
+        if split == 'train':
             self.transform += [
-                # RandomNoise(),
+                RandomNoise(),
                 RandFlip(),
-                RandRotate(),
+                # RandRotate(),
             ]
         self.transform += [
             ToTensor()
@@ -391,202 +437,151 @@ class TrainEvalDataset(Dataset):
         return new_img, swap_matrix, original_matrix
 
     def __getitem__(self, index):
-        image, label = self.data_reader[index]
-        image = self.transform(image)
-        if self.swap_img:
-            swaped_image, swap_matrix, original_matrix = self.swap(image)
-            original_matrix = (original_matrix / 1).astype(np.float32)
-            swap_matrix = (swap_matrix / 1).astype(np.float32)
-        else:
-            swaped_image, swap_matrix, original_matrix = 0, 0, 0
-            original_matrix = 0
-            swap_matrix = 0
-        return image, original_matrix,\
-            swaped_image, swap_matrix,\
-            label.label
+        try:
+            image, label = self.data_reader[index]
+            image = self.transform(image)
+            # logger.info(image.shape)
+            assert len(image.shape) == 3
+            assert image.shape[0] == 3
+        except Exception as e:
+            logger.error(e, exc_info=True)
+            return self.__getitem__(index-1)
+        if image is None:
+            return self.__getitem__(index-1)
+        # logger.info(image.shape)
+        # if self.swap_img:
+        #     swaped_image, swap_matrix, original_matrix = self.swap(image)
+        #     original_matrix = (original_matrix / 1).astype(np.float32)
+        #     swap_matrix = (swap_matrix / 1).astype(np.float32)
+        # else:
+        #     swaped_image, swap_matrix, original_matrix = 0, 0, 0
+        #     original_matrix = 0
+        #     swap_matrix = 0
+        return image, label
 
     def __len__(self):
         return self.data_reader.__len__()
 
 
-def calculate_loss(
-        net_out,
-        label=None, matrix=None, label_adv=None,
-        global_step=None,
-        learn_swapped=True):
-    active_cls = net_out['cls']
-    active_adv = net_out['adv']
-    active_reg = net_out['reg']
-    active_matrix = net_out['ctl']
-    activa_th = net_out['threshold']
-    loss_cls = nn.functional.cross_entropy(active_cls, label)
-    if learn_swapped:
-        loss_adv = nn.functional.cross_entropy(active_adv, label_adv)
-        loss_ctl = nn.functional.l1_loss(active_matrix, matrix)
-        loss = loss_cls + loss_adv + loss_ctl
-        loss_ctl = loss_ctl.detach().cpu().numpy()
-        loss_adv = loss_adv.detach().cpu().numpy()
-        loss_cls = loss_cls.detach().cpu().numpy()
-    else:
-        loss = loss_cls
-        loss_adv = 0
-        loss_ctl = 0
-    if active_reg is not None:
-        loss_reg = nn.functional.smooth_l1_loss(
-            active_reg, label.float().view_as(active_reg))
-        loss += loss_reg
-        loss_reg = loss_reg.detach().cpu().numpy()
-    else:
-        loss_reg = 0
-    if activa_th is not None:
-        _, yv = torch.meshgrid(
-            [torch.arange(0, label.shape[0]), torch.arange(0, 5)])
-        yv = yv.to(device)
-        label_th = torch.stack([label] * 5, dim=1)
-        label_th = (label_th > yv).float()
-        loss_threshold = nn.functional.binary_cross_entropy_with_logits(
-            activa_th, label_th)
-    return loss, dict(loss=loss, loss_cls=loss_cls,
-                      loss_adv=loss_adv, loss_ctl=loss_ctl,
-                      loss_reg=loss_reg, loss_threshold=loss_threshold)
+def calculate_metrics(config, output_all, label_all):
+    result = {}
+    for metric in config:
+        output = np.array(output_all[metric.predicts])
+        output = output.argmax(axis=1)
+        label = np.array(label_all[metric.ground_truth])
+        logger.info(output.shape)
+        logger.info(label.shape)
+        result[metric.name] = (output == label).mean()
+    result['mapping'] = calculate_mapping(output_all, label_all)
+    return result
 
 
-def test(net, data_loader, epoach):
+def calculate_mapping(output_all, label_all):
+    mapping = {
+        int(i.split(',')[2]): int(i.split(',')[1])
+        for i in open('../dataset/mapping_list.txt', 'r', encoding='GBK').
+        read().splitlines()}
+    label1st = np.array(label_all['fst_label'])
+    output = np.array(output_all['level2'])
+    output = output.argmax(axis=1)
+    output = list(map(lambda x: mapping[int(x)], output))
+    return (output == label1st).mean()
+
+
+def test(config, net, data_loader, epoach):
     net.eval()
     global_step = epoach * len(data_loader)
-    cls_predict, cls_gt = [], []
-    for batch_cnt, batch in enumerate(tqdm(data_loader)):
-        image, matrix, swapped_image, swap_matrix, label = batch
-        label_adv = torch.LongTensor([0]*image.shape[0])
-        image = (image)
-        matrix = (matrix)
-        label = (label)
-
+    cls_predict, cls_gt = {}, {}
+    for batch_cnt, batch in tqdm(
+            enumerate(data_loader), total=len(data_loader)):
+        image, label = batch
         image = image.to(device)
-        matrix = matrix.to(device)
-        label = label.to(device)
-        label_adv = label_adv.to(device)
-
+        for k, v in label.items():
+            if isinstance(v, torch.Tensor):
+                label[k] = label[k].to(device)
         net_out = net(image)
-        active_cls = net_out['cls']
-        active_th = net_out['threshold']
-        active_reg = net_out['reg']
-
-        loss, loss_dict = calculate_loss(
-            net_out,
-            label=label,
-            matrix=matrix,
-            label_adv=label_adv, learn_swapped=False)
-
-        for name, loss_val in loss_dict.items():
-            summery_writer.add_scalar(
-                f'test/{name}', loss_val,
-                global_step=global_step
-            )
-        label = label.detach().cpu().numpy()
-        active_cls = active_cls.detach().cpu().numpy()
-        result_cls = np.argmax(active_cls, axis=1)
-
-        # active_adv = active_adv.detach().cpu().numpy()
-        # result_adv = np.argmax(active_adv, axis=1)
-        # label_adv = label_adv.detach().cpu().numpy()
-        active_th = active_th.detach().cpu().numpy()
-        active_th = 1. / (1. + np.exp(-active_th))
-        active_th = active_th > 0.5
-        label_th = np.stack([label] * 5, axis=1)
-        for i in range(5):
-            label_th[:, i] = label_th[:, i] > i
-        acc_th = np.mean(active_th == label_th, axis=0)
-        summery_writer.add_scalar(
-            'test/class_acc', np.mean(result_cls == label),
-            global_step=global_step
-        )
-        cls_gt += label.tolist()
-        cls_predict += result_cls.tolist()
-        # summery_writer.add_scalar(
-        #     'test/class_adv', np.mean(result_adv == label_adv),
-        #     global_step=global_step
-        # )
-        if active_reg is not None:
-            active_reg = np.round(active_reg.detach().cpu().numpy())
-            summery_writer.add_scalar(
-                'test/class_reg_acc', np.mean(active_reg == label),
-                global_step=global_step
-            )
-        summery_writer.add_scalars(
-            'test/bin_classification_acc',
-            {f'acc_{i}': acc_th[i] for i in range(5)},
-            global_step=global_step
-        )
+        loss_sum, loss_map = calculate_loss(
+            config.net.loss, net_out, label)
+        wtire_summary(loss_map, 'test', global_step)
+        for k, v in net_out.items():
+            if k not in cls_predict:
+                cls_predict[k] = []
+            cls_predict[k] += v.detach().cpu().numpy().tolist()
+        for k, v in label.items():
+            if k not in cls_gt:
+                cls_gt[k] = []
+            if not isinstance(v, torch.Tensor):
+                continue
+            cls_gt[k] += v.detach().cpu().numpy().tolist()
         global_step += 1
-    cls_gt = np.array(cls_gt)
-    cls_predict = np.array(cls_predict)
-    summery_writer.add_scalar(
-        'test/acc_all',
-        np.mean(cls_gt == cls_predict),
-        epoach
-    )
-    # summery_writer.add_scalar(
-    #     'test/f1',
-    #     sklearn
-    # )
+    test_metrix = calculate_metrics(config.metrics, cls_predict, cls_gt)
+    logger.info(test_metrix)
+    for k, v in test_metrix.items():
+        summery_writer.add_scalar(
+            f'metrics/{k}',
+            v,
+            epoach
+        )
 
 
-# noinspection PyArgumentList
+def calculate_loss(config, net_out, label):
+    loss = {}
+    loss_sum = None
+    for cfg in config:
+        assert cfg.input in net_out
+        input = net_out[cfg.input]
+        target = label[cfg.target]
+        loss_val = cfg.loss_type(input, target)
+        loss_val *= cfg.weight
+        assert cfg.name not in loss
+        loss[cfg.name] = loss_val
+        if loss_sum is None:
+            loss_sum = loss_val
+        else:
+            loss_sum += loss_val
+    return loss_sum, loss
+
+
+def wtire_summary(loss_map, tag='train', step=None):
+    for k, v in loss_map.items():
+        summery_writer.add_scalar(
+            f'{tag}/{k}_loss',
+            v.detach().cpu().numpy(),
+            global_step=step
+        )
+
+
 def train(config):
     n_clsaa = 6
     Learn_Swaped = False
 
     loader = DataLoader(
         TrainEvalDataset(
-            config.dataset, split='train', augment=True, swap=True),
-        config.batch_size, True, num_workers=12)
+            config.dataset(split='train', **config.dataset_parameter),
+            config),
+        config.batch_size, True, num_workers=20)
     test_loader = DataLoader(
-        TrainEvalDataset(config.dataset, split='test'),
-        config.batch_size, False, num_workers=12)
-    net = ResNet(config.net)
-    net.load_state_dict(torch.load('runs/resnet50-19c8e357.pth'), strict=False)
-    net = net.to(device)
+        TrainEvalDataset(
+            config.dataset(split='test', **config.dataset_parameter),
+            config),
+        config.batch_size, False, num_workers=20)
+    net = NetModel(config.net)
     net = nn.DataParallel(net)
-
-    ignored_params = list(map(id, net.module.fc_adv.parameters()))
-    ignored_params += list(map(id, net.module.fc_cls.parameters()))
-    if config.net.with_regression:
-        ignored_params += list(map(id, net.module.fc_regression.parameters()))
-    ignored_params += list(
-        map(id, net.module.construction_learning_conv.parameters()))
-
-    base_params = filter(
-        lambda p: id(p) not in ignored_params,
-        net.module.parameters())
-
-    base_lr = 0.01
-    lr_ratio = 1
-
-    def lr_policy(step):
-        if step < 20:
-            return 0.01 * 1.259 ** step
-        return 0.3 ** (step // 200)
-
-    learning_parametars = [
-        {'params': base_params},
-        {'params': net.module.fc_cls.parameters(), 'lr': lr_ratio*base_lr},
-        {'params': net.module.fc_adv.parameters(), 'lr': 0.1*base_lr},
-        {'params': net.module.construction_learning_conv.parameters(),
-            'lr': 0.1*base_lr},
-    ]
-    if config.net.with_regression:
-        learning_parametars.append(
-            {'params': net.module.fc_regression.parameters(),
-             'lr': 0.1*base_lr})
-    optimizer = SGD(net.parameters(), 0.01, 0.9)
-    # optimizer = Adam(learning_parametars, base_lr)
+    unused = net.load_state_dict(
+        {('module.base_net.'+k): v
+            for k, v in torch.load(config.net.pre_train).items()},
+        strict=False)
+    logger.info(unused)
+    net = net.to(device)
+    optimizer = SGD(net.parameters(), 0.001, 0.9)
     exp_lr_scheduler = lr_scheduler.ExponentialLR(optimizer, 0.97)
 
-    storage_dict = SqliteDict('./log/dcl_snap.db')
+    storage_dict = SqliteDict(f'{config.output_dir}/dcl_snap.db')
     start_epoach = 0
     if len(storage_dict) > 0:
         kk = list(storage_dict.keys())
+        # net.load_state_dict(
+        #     torch.load(BytesIO(storage_dict[38])))
         net.load_state_dict(
             torch.load(BytesIO(storage_dict[kk[-1]])))
         start_epoach = int(kk[-1]) + 1
@@ -595,83 +590,19 @@ def train(config):
     for epoach in (range(start_epoach, 500)):
         net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
-            image, matrix, swapped_image, swap_matrix, label = batch
-            if Learn_Swaped:
-                label_adv = torch.LongTensor(
-                    [0]*image.shape[0] + [1]*image.shape[0])
-                image = torch.cat((image, swapped_image), dim=0)
-                matrix = torch.cat((matrix, swap_matrix), dim=0)
-                label = torch.cat((label, label), dim=0)
-            else:
-                label_adv = torch.LongTensor(
-                    [0] * image.shape[0])
-
+            image, label = batch
             image = image.to(device)
-            label = label.to(device)
-            matrix = matrix.to(device)
-            label_adv = label_adv.to(device)
-
+            for k, v in label.items():
+                if isinstance(v, torch.Tensor):
+                    label[k] = label[k].to(device)
             optimizer.zero_grad()
-
             net_out = net(image)
-            active_cls, active_adv, active_matrix = net_out['cls'],\
-                net_out['adv'], net_out['ctl']
-            active_th = net_out['threshold']
-            active_reg = net_out['reg']
-
-            loss, loss_dict = calculate_loss(
-                net_out,
-                label=label,
-                matrix=matrix,
-                label_adv=label_adv,
-                learn_swapped=Learn_Swaped)
-
-            loss.backward()
+            loss_sum, loss_map = calculate_loss(
+                config.net.loss, net_out, label)
+            loss_sum.backward()
             optimizer.step()
-
-            for name, loss_val in loss_dict.items():
-                summery_writer.add_scalar(
-                    f'train/{name}', loss_val,
-                    global_step=global_step
-                )
-            label = label.detach().cpu().numpy()
-            active_cls = active_cls.detach().cpu().numpy()
-            result_cls = np.argmax(active_cls, axis=1)
-
-            active_adv = active_adv.detach().cpu().numpy()
-            result_adv = np.argmax(active_adv, axis=1)
-            label_adv = label_adv.detach().cpu().numpy()
-            active_th = active_th.detach().cpu().numpy()
-            active_th = 1. / (1. + np.exp(-active_th))
-            active_th = active_th > 0.5
-            label_th = np.stack([label] * 5, axis=1)
-            # logger.info(label_th)
-            for i in range(5):
-                label_th[:, i] = label_th[:, i] > i
-            # logger.info(label_th)
-            # logger.info(active_th)
-            # logger.info(label_th == active_th)
-            acc_th = np.mean(active_th == label_th, axis=0)
-            if active_reg is not None:
-                active_reg = np.round(active_reg.detach().cpu().numpy())
-                summery_writer.add_scalar(
-                    'train/class_reg_acc', np.mean(active_reg == label),
-                    global_step=global_step
-                )
-            summery_writer.add_scalar(
-                'train/class_acc', np.mean(result_cls == label),
-                global_step=global_step
-            )
-            summery_writer.add_scalar(
-                'train/class_adv', np.mean((result_adv == label_adv)),
-                global_step=global_step
-            )
-            summery_writer.add_scalars(
-                'train/bin_classification_acc',
-                {f'acc_{i}': acc_th[i] for i in range(5)},
-                global_step=global_step
-            )
             global_step += 1
+            wtire_summary(loss_map, 'train', global_step)
         exp_lr_scheduler.step(epoach)
         logger.debug(f'saving epoach {epoach}')
         buffer = BytesIO()
@@ -679,23 +610,32 @@ def train(config):
         buffer.seek(0)
         storage_dict[epoach] = buffer.read()
         storage_dict.commit()
-        test(net, test_loader, epoach)
+        test(config, net, test_loader, epoach)
 
 
 class Predictor(MServiceInstance):
     def init_env(self):
-        net = ResNet(num_classes=6, with_regression=True)
+        net = NetModel(self.config.net)
         net = nn.DataParallel(net)
-        net.load_state_dict(torch.load(self.snap_file))
+        net.load_state_dict(torch.load(self.snap_file, map_location='cpu'))
         self.transform = Compose((
-            FundusAOICrop(),
-            Resize(448),
+            Resize(int(self.config.input_size * 1.2)),
+            RandomCrop(self.config.input_size),
             ToFloat(),
             RangeCenter(),
             ToTensor()
         ))
         self.net = net
         self.net.eval()
+
+    def _read(self, fname):
+        image = np.array(Image.open(open(fname, 'rb')))
+        if len(image.shape) < 2:
+            return self.__getitem__(index-1)
+        if len(image.shape) != 3:
+            image = np.stack((image, image, image), axis=2)
+        image = image[:, :, :3]
+        return image
 
     def __call__(self, arg):
         if self.net is None:
@@ -704,6 +644,8 @@ class Predictor(MServiceInstance):
             arg = (arg,)
         elif type(arg) in (list, tuple):
             pass
+        elif type(arg) is str:
+            arg = (self._read(arg),)
         else:
             logger.error(f'FUCK the arg is {type(arg)}')
         result = []
@@ -712,43 +654,116 @@ class Predictor(MServiceInstance):
             img = img[np.newaxis, :, :, :]
             img = torch.Tensor(img)
             net_result = self.net(img)
-            rr = net_result['reg'].detach().cpu().numpy().item()
-            cls = net_result['cls'].detach().cpu().numpy()
+            logger.info(net_result['level1'].detach().cpu().numpy().shape)
+            rr = net_result['level1'].detach().cpu().numpy().argmax(axis=1)
             logger.info(rr)
-            logger.info(cls)
-            result.append(dict(
-                level=round(rr),
-                raw=rr,
-                prob=softmax(cls).tolist()
-            ))
-            return result
+            return rr
 
-    def __init__(self, snap_file='snap.pkl'):
+    def __init__(self, config, snap_file='snap.pkl'):
+        self.config = config
         self.transform = None
         self.snap_file = snap_file
         self.net = None
 
 
+# add_multi(
 def get_configure():
     cfg = Configure()
     cfg.\
         add_mapping('dataset', dict(
             kaggle_dr=DRDataset,
             bird=CUBBirdDataset,
+            rubbish=RubbishDataset,
         ), default_value='kaggle_dr').\
-        add('batch_size', 10)
+        add_multi(batch_size=dict(default_value=10)).\
+        add('dataset_parameter', default_value=dict())
     cfg.add_subconfigure('net').\
-        add('num_classes', 6).\
-        add('groups', 1).\
-        add('width_per_group', 64).\
-        add('replace_stride_with_dilation', None).\
-        add('norm_layer', None).\
-        add('with_regression', False)
+        add_mapping(
+            'basenet',
+            default_value='res_net',
+            name_mapping=dict(
+                inception4=InceptionV4,
+                res_net=ResNet,
+                pans=PNASNet5Large)).\
+        add('net_parameters', default_value=dict(
+            num_classes=6,
+            groups=1,
+            width_per_group=64,
+            replace_stride_with_dilation=None,
+            norm_layer=None,
+            with_regression=False)).\
+        add_multi(
+            pre_train='runs/resnet50-19c8e357.pth'
+        )
+    cfg.net.add_list(
+        'outputs',
+        lambda: Configure().
+        add_multi(
+            layer_parameters=dict(default_value=dict(
+                in_features=2048,
+                out_features=10,
+                bias=True
+            )),
+            name_input=dict(default_value='feature'),
+            name_output=dict(default_value='level_ce')).
+        add_mapping(
+            'model',
+            default_value='fc',
+            name_mapping=dict(
+                fc=nn.Linear,
+                softmax=nn.Softmax,
+            ))
+    ).add_list(
+        'loss',
+        lambda: Configure().
+        add_multi(
+            input='level_ce',
+            target='level',
+            name='level_ce_loss',
+            weight=1,
+        ).
+        add_mapping('loss_type', name_mapping=dict(
+            cross_entropy=nn.CrossEntropyLoss(),
+            smooth_l1_loss=nn.SmoothL1Loss()
+        ), default_value='cross_entropy')
+    )
+    cfg.add_list(
+        'metrics',
+        lambda: Configure().add_multi(
+            name='acc',
+            predicts='level_ce',
+            ground_truth='label'
+        )
+    )
+    cfg.add_multi(
+        output_dir='log/',
+        input_size=224,
+    )
     return cfg
 
+
+# class DummyDataset(Dataset):
+#     def __len__(self):
+#         return 10000
+
+#     def __getitem__(self, index):
+#         return np.random.rand(448, 448).astype(np.float32),\
+#             dict(a=1, b=2)
 if __name__ == "__main__":
+    # loader = DataLoader(DummyDataset(), 10, False)
+    # for i in loader:
+    #     logger.info(f'{i}')
+    #     break
+    # sys.exit(0)
     config = get_configure()
-    print(config.to_yaml())
+    config.from_yaml(sys.argv[1])
+    logger.info(config.to_yaml())
+    summery_writer = SummaryWriter(logdir=f'{config.output_dir}/log')
+    # net = NetModel(config.net)
+    # xx = np.random.rand(1, 3, 448, 448).astype(np.float32)
+    # xx = torch.from_numpy(xx)
+    # out = net(xx)
+    # logger.info(out)
     train(config)
-    pp = Predictor()
-    pp.init_env()
+    # pp = Predictor()
+    # pp.init_env()
