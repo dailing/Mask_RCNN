@@ -295,7 +295,7 @@ class InceptionV4(nn.Module):
             Inception_C(),
             Inception_C()
         )
-        self.last_linear = nn.Linear(1536, num_classes)
+        # self.last_linear = nn.Linear(1536, num_classes)
 
     def logits(self, features):
         # Allows image of any size to be processed

@@ -25,8 +25,11 @@ from util.augment import ResizeKeepAspectRatio, Compose, \
 from util.logs import get_logger
 from scipy.special import softmax
 import sys
-from pasnet import PNASNet5Large
-from inceptionv4 import InceptionV4
+from model.pasnet import PNASNet5Large
+from model.inceptionv4 import InceptionV4
+from dataset import datasets as avaliable_datasets
+import argparse
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 
 logger = get_logger('fff')
@@ -390,16 +393,16 @@ class TrainEvalDataset(Dataset):
         self.k = __k
         self.swap_img = swap
         self.transform = [
-            ResizeKeepAspectRatio(int(self.config.input_size * 1.2)),
-            RandomCrop(self.config.input_size),
             ToFloat(),
+            Resize(int(self.config.input_size)),
+            # RandomCrop(self.config.input_size),
             RangeCenter()
         ]
         if split == 'train':
             self.transform += [
                 RandomNoise(),
                 RandFlip(),
-                # RandRotate(),
+                RandRotate(),
             ]
         self.transform += [
             ToTensor()
@@ -441,8 +444,8 @@ class TrainEvalDataset(Dataset):
             image, label = self.data_reader[index]
             image = self.transform(image)
             # logger.info(image.shape)
-            assert len(image.shape) == 3
-            assert image.shape[0] == 3
+            # assert len(image.shape) == 3
+            # assert image.shape[0] == 3
         except Exception as e:
             logger.error(e, exc_info=True)
             return self.__getitem__(index-1)
@@ -463,29 +466,37 @@ class TrainEvalDataset(Dataset):
         return self.data_reader.__len__()
 
 
+def metrics_acc(output, label):
+    output = output.argmax(axis=1)
+    return (output == label).mean()
+
+
+def metrics_AP(output, label):
+    n_class = output.shape[1]
+    AP = {}
+    for i in range(n_class):
+        AP[i] = average_precision_score(label == i, output[:, i])
+    logger.info(AP)
+    return np.mean(list(AP.values()))
+
+
+def metrics_mRoc(output, label):
+    n_class = output.shape[1]
+    mROC = {}
+    for i in range(n_class):
+        mROC[i] = roc_auc_score(label == i, output[:, i])
+    logger.info(mROC)
+    return np.mean(list(mROC.values()))
+
+
 def calculate_metrics(config, output_all, label_all):
     result = {}
     for metric in config:
         output = np.array(output_all[metric.predicts])
-        output = output.argmax(axis=1)
         label = np.array(label_all[metric.ground_truth])
-        logger.info(output.shape)
-        logger.info(label.shape)
-        result[metric.name] = (output == label).mean()
-    result['mapping'] = calculate_mapping(output_all, label_all)
+        result[metric.name] = metric.func(output, label)
+    # result['mapping'] = calculate_mapping(output_all, label_all)
     return result
-
-
-def calculate_mapping(output_all, label_all):
-    mapping = {
-        int(i.split(',')[2]): int(i.split(',')[1])
-        for i in open('../dataset/mapping_list.txt', 'r', encoding='GBK').
-        read().splitlines()}
-    label1st = np.array(label_all['fst_label'])
-    output = np.array(output_all['level2'])
-    output = output.argmax(axis=1)
-    output = list(map(lambda x: mapping[int(x)], output))
-    return (output == label1st).mean()
 
 
 def test(config, net, data_loader, epoach):
@@ -513,6 +524,8 @@ def test(config, net, data_loader, epoach):
             if not isinstance(v, torch.Tensor):
                 continue
             cls_gt[k] += v.detach().cpu().numpy().tolist()
+        if batch_cnt > 10:
+            break
         global_step += 1
     test_metrix = calculate_metrics(config.metrics, cls_predict, cls_gt)
     logger.info(test_metrix)
@@ -528,7 +541,7 @@ def calculate_loss(config, net_out, label):
     loss = {}
     loss_sum = None
     for cfg in config:
-        assert cfg.input in net_out
+        assert cfg.input in net_out, cfg.input
         input = net_out[cfg.input]
         target = label[cfg.target]
         loss_val = cfg.loss_type(input, target)
@@ -590,6 +603,7 @@ def train(config):
     for epoach in (range(start_epoach, 500)):
         net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
+            break
             image, label = batch
             image = image.to(device)
             for k, v in label.items():
@@ -666,15 +680,10 @@ class Predictor(MServiceInstance):
         self.net = None
 
 
-# add_multi(
 def get_configure():
     cfg = Configure()
     cfg.\
-        add_mapping('dataset', dict(
-            kaggle_dr=DRDataset,
-            bird=CUBBirdDataset,
-            rubbish=RubbishDataset,
-        ), default_value='kaggle_dr').\
+        add_mapping('dataset', avaliable_datasets, default_value='kaggle_dr').\
         add_multi(batch_size=dict(default_value=10)).\
         add('dataset_parameter', default_value=dict())
     cfg.add_subconfigure('net').\
@@ -732,8 +741,12 @@ def get_configure():
         lambda: Configure().add_multi(
             name='acc',
             predicts='level_ce',
-            ground_truth='label'
-        )
+            ground_truth='label',
+        ).add_mapping('func', name_mapping=dict(
+            acc=metrics_acc,
+            mAP=metrics_AP,
+            mROC=metrics_mRoc,
+        ), default_value='acc')
     )
     cfg.add_multi(
         output_dir='log/',
@@ -742,28 +755,25 @@ def get_configure():
     return cfg
 
 
-# class DummyDataset(Dataset):
-#     def __len__(self):
-#         return 10000
-
-#     def __getitem__(self, index):
-#         return np.random.rand(448, 448).astype(np.float32),\
-#             dict(a=1, b=2)
 if __name__ == "__main__":
-    # loader = DataLoader(DummyDataset(), 10, False)
-    # for i in loader:
-    #     logger.info(f'{i}')
-    #     break
-    # sys.exit(0)
-    config = get_configure()
-    config.from_yaml(sys.argv[1])
-    logger.info(config.to_yaml())
-    summery_writer = SummaryWriter(logdir=f'{config.output_dir}/log')
-    # net = NetModel(config.net)
-    # xx = np.random.rand(1, 3, 448, 448).astype(np.float32)
-    # xx = torch.from_numpy(xx)
-    # out = net(xx)
-    # logger.info(out)
-    train(config)
-    # pp = Predictor()
-    # pp.init_env()
+    parser = argparse.ArgumentParser(description='Process some integers.')
+    parser.add_argument('cmd', type=str, choices=['train', 'gen_config'])
+    parser.add_argument('-config', type=str, required=False, help='configure file')
+    args = parser.parse_args()
+
+    if args.cmd == 'gen_config':
+        print(get_configure().make_sample_yaml())
+        sys.exit(0)
+    elif args.cmd == 'train':
+        config = get_configure()
+        config.from_yaml(args.config)
+        # logger.info(config.to_yaml())
+        summery_writer = SummaryWriter(logdir=f'{config.output_dir}/log')
+        # net = NetModel(config.net)
+        # xx = np.random.rand(1, 3, 448, 448).astype(np.float32)
+        # xx = torch.from_numpy(xx)
+        # out = net(xx)
+        # logger.info(out)
+        train(config)
+        # pp = Predictor()
+        # pp.init_env()
