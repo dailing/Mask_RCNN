@@ -263,7 +263,7 @@ class Inception_C(nn.Module):
 
 class InceptionV4(nn.Module):
 
-    def __init__(self, num_classes=1001):
+    def __init__(self, num_classes=1001, input_channel=3):
         super(InceptionV4, self).__init__()
         # Special attributs
         self.input_space = None
@@ -272,7 +272,7 @@ class InceptionV4(nn.Module):
         self.std = None
         # Modules
         self.features = nn.Sequential(
-            BasicConv2d(3, 32, kernel_size=3, stride=2),
+            BasicConv2d(input_channel, 32, kernel_size=3, stride=2),
             BasicConv2d(32, 32, kernel_size=3, stride=1),
             BasicConv2d(32, 64, kernel_size=3, stride=1, padding=1),
             Mixed_3a(),

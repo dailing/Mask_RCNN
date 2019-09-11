@@ -223,47 +223,6 @@ class PilLoader:
                 return img.convert('RGB')
 
 
-class DRDataset(PilLoader):
-    def __init__(self, split=None, root=None):
-        self.reader = None
-        if split is None:
-            split = 'train'
-        self.split = split
-        label_file = {
-            'train': 'dataset/grade/trainLabels.csv',
-            'test': 'dataset/grade/retinopathy_solution.csv',
-        }
-        self.files = pd.read_csv(label_file[split])
-        self.files.columns = ('image', *self.files.columns[1:])
-        self.files_by_level = [
-            self.files[self.files.level == i] for i in range(5)
-        ]
-        self.length = len(self.files)
-
-    def __getitem__(self, index):
-        if index >= self.length:
-            raise IndexError
-        if self.split == 'train':
-            level = index % 5
-            index_in_level = random.randint(
-                0, len(self.files_by_level[level])-1)
-            row = self.files_by_level[level].iloc[index_in_level]
-        else:
-            row = self.files.iloc[index]
-        fname = f'/share/small_pic/kaggle_dr@448/{row.image}'
-        file_content = open(fname, 'rb').read()
-        if file_content is None:
-            raise Exception(f'file {fname} not found')
-        img = cv2.imdecode(
-            np.frombuffer(file_content, np.uint8),
-            cv2.IMREAD_COLOR)
-        # img = self.transform(img)
-        return img, row.to_dict()
-
-    def __len__(self):
-        return self.length
-
-
 class DRDatasetRemote(PilLoader):
     def __init__(self, split=None):
         self.reader = None
@@ -446,21 +405,12 @@ class TrainEvalDataset(Dataset):
             # logger.info(image.shape)
             # assert len(image.shape) == 3
             # assert image.shape[0] == 3
+            return image, label
         except Exception as e:
             logger.error(e, exc_info=True)
-            return self.__getitem__(index-1)
-        if image is None:
-            return self.__getitem__(index-1)
-        # logger.info(image.shape)
-        # if self.swap_img:
-        #     swaped_image, swap_matrix, original_matrix = self.swap(image)
-        #     original_matrix = (original_matrix / 1).astype(np.float32)
-        #     swap_matrix = (swap_matrix / 1).astype(np.float32)
-        # else:
-        #     swaped_image, swap_matrix, original_matrix = 0, 0, 0
-        #     original_matrix = 0
-        #     swap_matrix = 0
-        return image, label
+            # return self.__getitem__(index-1)
+        # if image is None:
+        #     return self.__getitem__(index-1)
 
     def __len__(self):
         return self.data_reader.__len__()
@@ -484,7 +434,10 @@ def metrics_mRoc(output, label):
     n_class = output.shape[1]
     mROC = {}
     for i in range(n_class):
-        mROC[i] = roc_auc_score(label == i, output[:, i])
+        try:
+            mROC[i] = roc_auc_score(label == i, output[:, i])
+        except ValueError as e:
+            mROC[i] = 0
     logger.info(mROC)
     return np.mean(list(mROC.values()))
 
@@ -524,8 +477,6 @@ def test(config, net, data_loader, epoach):
             if not isinstance(v, torch.Tensor):
                 continue
             cls_gt[k] += v.detach().cpu().numpy().tolist()
-        if batch_cnt > 10:
-            break
         global_step += 1
     test_metrix = calculate_metrics(config.metrics, cls_predict, cls_gt)
     logger.info(test_metrix)
@@ -581,7 +532,8 @@ def train(config):
     net = NetModel(config.net)
     net = nn.DataParallel(net)
     unused = net.load_state_dict(
-        {('module.base_net.'+k): v
+        {(('module.base_net.'+k) if not
+            k.startswith('module.base_net') else k): v
             for k, v in torch.load(config.net.pre_train).items()},
         strict=False)
     logger.info(unused)
@@ -603,7 +555,6 @@ def train(config):
     for epoach in (range(start_epoach, 500)):
         net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
-            break
             image, label = batch
             image = image.to(device)
             for k, v in label.items():
@@ -625,59 +576,6 @@ def train(config):
         storage_dict[epoach] = buffer.read()
         storage_dict.commit()
         test(config, net, test_loader, epoach)
-
-
-class Predictor(MServiceInstance):
-    def init_env(self):
-        net = NetModel(self.config.net)
-        net = nn.DataParallel(net)
-        net.load_state_dict(torch.load(self.snap_file, map_location='cpu'))
-        self.transform = Compose((
-            Resize(int(self.config.input_size * 1.2)),
-            RandomCrop(self.config.input_size),
-            ToFloat(),
-            RangeCenter(),
-            ToTensor()
-        ))
-        self.net = net
-        self.net.eval()
-
-    def _read(self, fname):
-        image = np.array(Image.open(open(fname, 'rb')))
-        if len(image.shape) < 2:
-            return self.__getitem__(index-1)
-        if len(image.shape) != 3:
-            image = np.stack((image, image, image), axis=2)
-        image = image[:, :, :3]
-        return image
-
-    def __call__(self, arg):
-        if self.net is None:
-            self.init_env()
-        if type(arg) is np.ndarray:
-            arg = (arg,)
-        elif type(arg) in (list, tuple):
-            pass
-        elif type(arg) is str:
-            arg = (self._read(arg),)
-        else:
-            logger.error(f'FUCK the arg is {type(arg)}')
-        result = []
-        for img in arg:
-            img = self.transform(img)
-            img = img[np.newaxis, :, :, :]
-            img = torch.Tensor(img)
-            net_result = self.net(img)
-            logger.info(net_result['level1'].detach().cpu().numpy().shape)
-            rr = net_result['level1'].detach().cpu().numpy().argmax(axis=1)
-            logger.info(rr)
-            return rr
-
-    def __init__(self, config, snap_file='snap.pkl'):
-        self.config = config
-        self.transform = None
-        self.snap_file = snap_file
-        self.net = None
 
 
 def get_configure():
@@ -755,10 +653,15 @@ def get_configure():
     return cfg
 
 
+def serve():
+    pass
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('cmd', type=str, choices=['train', 'gen_config'])
-    parser.add_argument('-config', type=str, required=False, help='configure file')
+    parser.add_argument(
+        '-config', type=str, required=False, help='configure file')
     args = parser.parse_args()
 
     if args.cmd == 'gen_config':
