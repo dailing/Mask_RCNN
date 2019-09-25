@@ -30,6 +30,7 @@ from model.inceptionv4 import InceptionV4
 from dataset import datasets as avaliable_datasets
 import argparse
 from sklearn.metrics import average_precision_score, roc_auc_score
+import util.bconfig
 
 
 logger = get_logger('fff')
@@ -192,12 +193,13 @@ class ResNet(nn.Module):
 
 
 class NetModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, with_feature=False):
         super().__init__()
         if config.net_parameters is None:
             config.net_parameters = {}
         self.base_net = config.basenet(**config.net_parameters)
         self.config = config
+        self.with_feature = with_feature
         for i in self.config.outputs:
             logger.info(f'{i.layer_parameters}')
             layer = i.model(**i.layer_parameters)
@@ -213,6 +215,8 @@ class NetModel(nn.Module):
             out = layer(values[i.name_input])
             values[i.name_output] = out
             outputs[i.name_output] = out
+        if self.with_feature:
+            return outputs, values
         return outputs
 
 
@@ -488,6 +492,47 @@ def test(config, net, data_loader, epoach):
         )
 
 
+def predict(
+        config, dataset, model_file,
+        num_workers=10, batch_size=1, gpu=True):
+    predict_device = torch.device('cuda' if gpu else 'cpu')
+    loader = DataLoader(
+        TrainEvalDataset(
+            dataset,
+            config),
+        batch_size=batch_size, shuffle=False,
+        num_workers=num_workers)
+    net = NetModel(config.net, with_feature=True)
+    net = nn.DataParallel(net)
+    unused = net.load_state_dict(
+        {(('module.base_net.'+k) if not
+            k.startswith('module.base_net') else k): v
+            for k, v in torch.load(model_file, map_location='cpu').items()},
+        strict=False)
+    logger.info(unused)
+    net = net.to(predict_device)
+    net.eval()
+    outputs = []
+    features = []
+    for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
+        image, label = batch
+        image = image.to(predict_device)
+        net_out, feature = net(image)
+        for k, v in net_out.items():
+            net_out[k] = v.detach().cpu()
+        for k, v in feature.items():
+            feature[k] = v.detach().cpu()
+        outputs.append(net_out)
+        features.append(feature)
+    record = {}
+    feature = {}
+    for k in outputs[0].keys():
+        record[k] = torch.cat([i[k] for i in outputs])
+    for k in features[0].keys():
+        feature[k] = torch.cat([i[k] for i in features])
+    return record, feature
+
+
 def calculate_loss(config, net_out, label):
     loss = {}
     loss_sum = None
@@ -578,79 +623,49 @@ def train(config):
         test(config, net, test_loader, epoach)
 
 
-def get_configure():
-    cfg = Configure()
-    cfg.\
-        add_mapping('dataset', avaliable_datasets, default_value='kaggle_dr').\
-        add_multi(batch_size=dict(default_value=10)).\
-        add('dataset_parameter', default_value=dict())
-    cfg.add_subconfigure('net').\
-        add_mapping(
-            'basenet',
-            default_value='res_net',
-            name_mapping=dict(
-                inception4=InceptionV4,
-                res_net=ResNet,
-                pans=PNASNet5Large)).\
-        add('net_parameters', default_value=dict(
-            num_classes=6,
-            groups=1,
-            width_per_group=64,
-            replace_stride_with_dilation=None,
-            norm_layer=None,
-            with_regression=False)).\
-        add_multi(
-            pre_train='runs/resnet50-19c8e357.pth'
+class DCLCONFIG(util.bconfig.Config):
+    class MetricsDef(util.bconfig.Config):
+        name = util.bconfig.Value('acc')
+        predicts = util.bconfig.Value('level_ce')
+        ground_truth = util.bconfig.Value('label')
+        func = util.bconfig.ValueMap(
+            'acc',
+            acc=metrics_acc, mAP=metrics_AP, mROC=metrics_mRoc,
         )
-    cfg.net.add_list(
-        'outputs',
-        lambda: Configure().
-        add_multi(
-            layer_parameters=dict(default_value=dict(
-                in_features=2048,
-                out_features=10,
-                bias=True
-            )),
-            name_input=dict(default_value='feature'),
-            name_output=dict(default_value='level_ce')).
-        add_mapping(
-            'model',
-            default_value='fc',
-            name_mapping=dict(
-                fc=nn.Linear,
-                softmax=nn.Softmax,
-            ))
-    ).add_list(
-        'loss',
-        lambda: Configure().
-        add_multi(
-            input='level_ce',
-            target='level',
-            name='level_ce_loss',
-            weight=1,
-        ).
-        add_mapping('loss_type', name_mapping=dict(
-            cross_entropy=nn.CrossEntropyLoss(),
-            smooth_l1_loss=nn.SmoothL1Loss()
-        ), default_value='cross_entropy')
-    )
-    cfg.add_list(
-        'metrics',
-        lambda: Configure().add_multi(
-            name='acc',
-            predicts='level_ce',
-            ground_truth='label',
-        ).add_mapping('func', name_mapping=dict(
-            acc=metrics_acc,
-            mAP=metrics_AP,
-            mROC=metrics_mRoc,
-        ), default_value='acc')
-    )
-    cfg.add_multi(
-        output_dir='log/',
-        input_size=224,
-    )
-    return cfg
+
+    class NetDef(util.bconfig.Config):
+        class LossDef(util.bconfig.Config):
+            input = util.bconfig.Value('level_ce')
+            target = util.bconfig.Value('level')
+            name = util.bconfig.Value('level_ce_loss')
+            weight = util.bconfig.Value(1)
+            loss_type = util.bconfig.ValueMap(
+                'cross_entropy',
+                cross_entropy=nn.CrossEntropyLoss(),
+                smooth_l1_loss=nn.SmoothL1Loss(),
+            )
+
+        class OutputsDef(util.bconfig.Config):
+            layer_parameters = util.bconfig.Value({})
+            name_input = util.bconfig.Value('feature')
+            name_output = util.bconfig.Value('level_ce')
+            model = util.bconfig.ValueMap(
+                'fc', fc=nn.Linear, softmax=nn.Softmax)
+
+        basenet = util.bconfig.ValueMap('resnet', inception4=InceptionV4,
+                                        res_net=ResNet, pans=PNASNet5Large)
+        net_parameters = util.bconfig.Value(dict(num_classes=6))
+        pre_train = util.bconfig.Value('runs/resnet50-19c8e357.pth')
+        outputs = util.bconfig.ValueList(OutputsDef)
+        loss = util.bconfig.ValueList(LossDef)
+
+    metrics = util.bconfig.ValueList(MetricsDef)
+    dataset = util.bconfig.ValueMap('kaggle_dr', **avaliable_datasets)
+    batch_size = util.bconfig.Value(10)
+    dataset_parameter = util.bconfig.Value({})
+    net = NetDef()
+    output_dir = util.bconfig.Value('log/')
+    input_size = util.bconfig.Value(224)
 
 
 def serve():
@@ -664,11 +679,12 @@ if __name__ == "__main__":
         '-config', type=str, required=False, help='configure file')
     args = parser.parse_args()
 
+    cfg = DCLCONFIG.build()
     if args.cmd == 'gen_config':
-        print(get_configure().make_sample_yaml())
+        print(cfg.dump_yaml())
         sys.exit(0)
     elif args.cmd == 'train':
-        config = get_configure()
+        config = cfg
         config.from_yaml(args.config)
         # logger.info(config.to_yaml())
         summery_writer = SummaryWriter(logdir=f'{config.output_dir}/log')
