@@ -299,7 +299,7 @@ def train(config):
         TrainEvalDataset(
             config.dataset(split='test', **config.dataset_parameter),
             config),
-        config.batch_size, False, num_workers=20)
+        2, False, num_workers=20)
     net = NetModel(config.net)
     net = nn.DataParallel(net)
     unused, unused1 = net.load_state_dict(
