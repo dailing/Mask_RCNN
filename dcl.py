@@ -19,9 +19,7 @@ from tqdm import tqdm
 from util.tasks import MServiceInstance, Task
 from util.config import Configure
 
-from util.augment import ResizeKeepAspectRatio, Compose, \
-    RandomNoise, RandFlip, ToTensor, ToFloat, FundusAOICrop, \
-    Resize, RandRotate, RangeCenter, RandomCrop, Normalize
+from util.augment import augment_map, Compose
 from util.logs import get_logger
 from scipy.special import softmax
 import sys
@@ -73,30 +71,18 @@ class TrainEvalDataset(Dataset):
         self.N = N
         self.k = __k
         self.swap_img = swap
-        resiez_size = int(self.config.input_size*1.2)
-        if split != 'train':
-            resiez_size = self.config.input_size
-        self.transform = [
-            ToFloat(),
-            Resize(resiez_size),
-            # RangeCenter(),
-            Normalize(
-                # mean=np.array([0.485, 0.456, 0.406], dtype=np.float32),
-                # std=np.array([0.229, 0.224, 0.225], dtype=np.float32)),
-                mean=np.array([0.5, 0.5, 0.5], dtype=np.float32),
-                std=np.array([0.5, 0.5, 0.5], dtype=np.float32)),
-        ]
+        # resiez_size = int(self.config.input_size*1.2)
+        # if split != 'train':
+        #     resiez_size = self.config.input_size
         if split == 'train':
-            self.transform += [
-                RandomNoise(),
-                RandFlip(),
-                # RandRotate(),
-                RandomCrop(self.config.input_size)
-            ]
-        self.transform += [
-            ToTensor()
+            transform = config.train_transform
+        else:
+            transform = config.test_transform
+        transform = [
+            transform_cfg.op(**transform_cfg.parameters)
+            for transform_cfg in transform
         ]
-        self.transform = Compose(self.transform)
+        self.transform = Compose(transform)
 
     def _generate_random_perm(self):
         original = np.mgrid[0:self.N, 0:self.N]
@@ -299,16 +285,19 @@ def train(config):
         TrainEvalDataset(
             config.dataset(split='test', **config.dataset_parameter),
             config),
-        2, False, num_workers=20)
+        config.batch_size, False, num_workers=20)
     net = NetModel(config.net)
     net = nn.DataParallel(net)
-    unused, unused1 = net.load_state_dict(
-        {(('module.base_net.'+k) if not
-            k.startswith('module.base_net') else k): v
-            for k, v in torch.load(config.net.pre_train).items()},
-        strict=False)
-    logger.info(unused)
-    logger.info(unused1)
+    logger.info(config.net.pre_train)
+    logger.info(type(config.net.pre_train))
+    if config.net.pre_train is not None and config.net.pre_train != 'None':
+        unused, unused1 = net.load_state_dict(
+            {(('module.base_net.'+k) if not
+                k.startswith('module.base_net') else k): v
+                for k, v in torch.load(config.net.pre_train).items()},
+            strict=False)
+        logger.info(unused)
+        logger.info(unused1)
     net = net.to(device)
     optimizer = SGD(net.parameters(), 0.01, 0.9)
     exp_lr_scheduler = lr_scheduler.ExponentialLR(optimizer, 0.95)
@@ -324,7 +313,7 @@ def train(config):
         start_epoach = int(kk[-1]) + 1
         logger.info(f'loading from epoach{start_epoach}')
     global_step = 0
-    for epoach in (range(start_epoach, 500)):
+    for epoach in (range(start_epoach, config.max_it)):
         net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
             image, label = batch
@@ -377,7 +366,9 @@ class DCLCONFIG(util.bconfig.Config):
             name_input = util.bconfig.Value('feature')
             name_output = util.bconfig.Value('level_ce')
             model = util.bconfig.ValueMap(
-                'fc', fc=nn.Linear, softmax=nn.Softmax)
+                'fc', fc=nn.Linear, softmax=nn.Softmax,
+                relu=nn.ReLU,
+            )
 
         basenet = util.bconfig.ValueMap('resnet', **model.models)
         net_parameters = util.bconfig.Value(dict(num_classes=6))
@@ -385,6 +376,12 @@ class DCLCONFIG(util.bconfig.Config):
         outputs = util.bconfig.ValueList(OutputsDef)
         loss = util.bconfig.ValueList(LossDef)
 
+    class AugmentDef(util.bconfig.Config):
+        op = util.bconfig.ValueMap('None', **augment_map)
+        parameters = util.bconfig.Value({})
+
+    train_transform = util.bconfig.ValueList(AugmentDef)
+    test_transform = util.bconfig.ValueList(AugmentDef)
     metrics = util.bconfig.ValueList(MetricsDef)
     dataset = util.bconfig.ValueMap('kaggle_dr', **avaliable_datasets)
     batch_size = util.bconfig.Value(10)
@@ -394,6 +391,7 @@ class DCLCONFIG(util.bconfig.Config):
     input_size = util.bconfig.Value(224)
     cmd = util.bconfig.Value('train')
     config = util.bconfig.Value('configure.yaml')
+    max_it = util.bconfig.Value(14)
 
 
 def serve():
@@ -414,6 +412,7 @@ if __name__ == "__main__":
     elif cfg.cmd == 'train':
         config = cfg
         config.from_yaml(cfg.config)
+        config.parse_args()
         summery_writer = SummaryWriter(logdir=f'{config.output_dir}/log')
         with open(f'{config.output_dir}/config.yaml', 'w') as f:
             f.write(config.dump_yaml())

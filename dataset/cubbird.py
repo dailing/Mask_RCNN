@@ -15,7 +15,7 @@ class PilLoader:
 
 
 class CUBBirdDataset(PilLoader):
-    def __init__(self, split=None, root=None):
+    def __init__(self, split=None, root=None, uniform_noise_ratio=0.1):
         if root is None:
             root = '../data/CUB_200_2011'
         image_list = pd.read_csv(
@@ -36,6 +36,13 @@ class CUBBirdDataset(PilLoader):
             header=None,
             names=['image_id', 'label'],
             index_col=0))
+        rstate = np.random.RandomState(100)
+        selection = rstate.rand(len(image_list)) > uniform_noise_ratio
+        noise_label = [
+            l if n else rstate.randint(0, 200)
+            for l, n in zip(image_list.label, selection)]
+        print(len(noise_label))
+        image_list.insert(2, 'uniform_noise', noise_label)
         if split is None:
             split = 'train'
         if split == 'train':
@@ -62,5 +69,7 @@ class CUBBirdDataset(PilLoader):
 if __name__ == "__main__":
     import torch
     from torch.utils.data import DataLoader
-    for i in CUBBirdDataset():
-        pass
+
+    dd = CUBBirdDataset()
+
+    print(dd.image_list)
