@@ -7,7 +7,8 @@ import numpy as np
 import json
 import hashlib
 from peewee import PostgresqlDatabase, Model, TextField,\
-	BlobField, DateTimeField, IntegerField, IntegrityError
+	BlobField, DateTimeField, IntegerField, IntegrityError,\
+	DatabaseProxy
 import playhouse.db_url
 from playhouse.postgres_ext import JSONField
 import datetime
@@ -16,8 +17,8 @@ import math
 import base64
 
 
-psql_db = playhouse.db_url.connect(
-	'postgresql://db_user:123456@db:5432/fuckdb')
+psql_db = DatabaseProxy()
+
 
 class BaseModel(Model):
 	"""A base model that will use our Postgresql database"""
@@ -37,9 +38,13 @@ class ImageAnnotation(BaseModel):
 	image_id = IntegerField(unique=True)
 
 
-psql_db.connect()
-psql_db.create_tables([ImageStorage, ImageAnnotation])
-
+try:
+	psql_db.initialize(playhouse.db_url.connect(
+	'postgresql://db_user:123456@db:5432/fuckdb'))
+	psql_db.connect()
+	psql_db.create_tables([ImageStorage, ImageAnnotation])
+except Exception as e:
+	print(e)
 
 logger = get_logger('interactive learning')
 

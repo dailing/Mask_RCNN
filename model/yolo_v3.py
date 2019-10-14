@@ -1,15 +1,10 @@
-# from __future__ import division
-
 import torch
 import torch.nn as nn
-# import torch.nn.functional as F
-# from torch.autograd import Variable
 import numpy as np
+from util.logs import get_logger
 
-# from utils.parse_config import *
-# from utils.utils import build_targets, to_cpu, non_max_suppression
-# import matplotlib.pyplot as plt
-# import matplotlib.patches as patches
+
+logger = get_logger('yolo')
 
 
 def xywh2xyxy(x):
@@ -403,6 +398,7 @@ class Darknet(nn.Module):
                 layer_i = int(module_def["from"])
                 x = layer_outputs[-1] + layer_outputs[layer_i]
             elif module_def["type"] == "yolo":
+                logger.info(module)
                 x, layer_loss = module[0](x, targets, img_dim)
                 loss += layer_loss
                 yolo_outputs.append(x)
