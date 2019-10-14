@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:v-bind="http://www.w3.org/1999/xhtml" xmlns:v-on="http://www.w3.org/1999/xhtml">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+    <title>F</title>
+
+    <link rel="stylesheet" href="bootstrap.min.css">
+
+    <script src="vue.js"></script>
+    <script src="vue-resource@1.5.1"></script>
+    <script src="vue-async-computed"></script>
+</head>
+<body>
+
+
+<div id="app">
+    <div class="sticky-top">
+        <div class="container">
+        <div class="row">
+            <canvas 
+                id="canvas"
+                width="400"
+                height="400"
+                style="background-color:#aa3333">
+            </canvas>
+            <input 
+                type="button"
+                class="btn btn-light col-12"
+                value="submit"
+                v-on:click=submit_anno()>
+        </div>
+        </div>
+    </div>
+
+    <div class="container">
+    <div class="row">
+        <h5 class="col-12"> Upload Images </h5>
+        <label class="col-12 col-form-label">input image</label>
+        <input type="file"
+                class="form-control-file col-12"
+                accept="image/*"
+                capture="camera"
+                ref="new_file_element"
+                v-on:change="file_to_upload = $event.target.files || $event.dataTransfer.files"
+                multiple webkitdirectory/>
+        <input type="button"
+                class="col-12 btn btn-light"
+                v-on:click="submit_anno()"
+                value="submit result"
+        >
+    </div>
+    </div>
+    <div class="container">
+        <div class="row">
+            <div class="card" style="width: 18rem;" v-for="img_url in images_this_page">
+                <img v-bind:src="img_url" class="card-img-top" alt="...">
+                <div class="card-body">
+                    <!-- <h5 class="card-title" v-bind:href="img_url">original Image</h5> -->
+                    <a class="card-text" v-bind:href="img_url">original Image</a>
+                </div>
+                <a class="btn btn-primary" v-on:click='handleNewImage(img_url)'>annotate</a>
+            </div>
+        </div>
+        <div>
+            <button  
+                class="btn btn-light"
+                v-on:click="current_page=Math.max(current_page-1,1), update_image()">
+                prev
+            </button>
+            <a>{{current_page}}/{{num_page}}</a>
+            <button
+                class="btn btn-light"
+                v-on:click="current_page=Math.min(current_page+1,num_page);update_image()">
+                next
+            </button>
+        </div>
+    </div>
+</div>
+
+
+      
+<script src="jquery-3.3.1.slim.min.js"></script>
+<script src="popper.min.js"></script>
+<script src="bootstrap.min.js"></script>
+<script src="index.js"></script>
+</body>
+</html>
