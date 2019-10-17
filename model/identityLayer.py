@@ -6,4 +6,4 @@ class IdentityNet(nn.Module):
         super(IdentityNet, self).__init__()
     
     def forward(self, *args):
-        return args
+        return {'feature': args}

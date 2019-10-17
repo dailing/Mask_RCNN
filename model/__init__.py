@@ -3,7 +3,7 @@ from .resnet import ResNet50, ResNet101
 from .pasnet import PNASNet5Large
 from .alexnet import AlexNet
 from .lenet import LeNet
-from .yolo_v3 import Darknet
+from .dark_53 import Darknet53
 from .identityLayer import IdentityNet
 
 
@@ -14,6 +14,5 @@ models = dict(
     pnasnet5=PNASNet5Large,
     alexnet=AlexNet,
     lenet=LeNet,
-    darknet=Darknet,
-    identity=IdentityNet
+    darknet=Darknet53,
 )

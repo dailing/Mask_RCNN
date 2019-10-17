@@ -16,8 +16,6 @@ from torch.optim import Adam, SGD
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from util.tasks import MServiceInstance, Task
-from util.config import Configure
 
 from util.augment import augment_map, Compose
 from util.logs import get_logger
@@ -49,7 +47,7 @@ class NetModel(nn.Module):
 
     def forward(self, x):
         values = self.base_net(x)
-        outputs = {}
+        outputs = values
         for i in self.config.outputs:
             layer = self.__getattr__(i.name_output)
             assert i.name_input in values, \
@@ -168,7 +166,7 @@ def calculate_metrics(config, output_all, label_all):
     return result
 
 
-def test(config, net, data_loader, epoach):
+def test(config, net, data_loader, epoach, loss_calculator):
     net.eval()
     global_step = epoach * len(data_loader)
     cls_predict, cls_gt = {}, {}
@@ -180,8 +178,7 @@ def test(config, net, data_loader, epoach):
             if isinstance(v, torch.Tensor):
                 label[k] = label[k].to(device)
         net_out = net(image)
-        loss_sum, loss_map = calculate_loss(
-            config.net.loss, net_out, label)
+        loss_sum, loss_map = loss_calculator(net_out, label)
         wtire_summary(loss_map, 'test', global_step)
         for k, v in net_out.items():
             if k not in cls_predict:
@@ -245,22 +242,34 @@ def predict(
     return record, feature
 
 
-def calculate_loss(config, net_out, label):
-    loss = {}
-    loss_sum = None
-    for cfg in config:
-        assert cfg.input in net_out, cfg.input
-        input = net_out[cfg.input]
-        target = label[cfg.target]
-        loss_val = cfg.loss_type(input, target)
-        loss_val *= cfg.weight
-        assert cfg.name not in loss
-        loss[cfg.name] = loss_val
-        if loss_sum is None:
-            loss_sum = loss_val
-        else:
-            loss_sum += loss_val
-    return loss_sum, loss
+class LossCalculator():
+    def __init__(self, config):
+        self.config = config
+        self.loss_instance = []
+        for cfg in config:
+            instance = cfg.loss_type(**cfg.loss_parameters)
+            self.loss_instance.append(instance)
+
+    def __call__(self, net_out, label):
+    # def calculate_loss(config, net_out, label):
+        loss = {}
+        loss_sum = None
+        for cfg, loss_ins in zip(self.config, self.loss_instance):
+            assert cfg.input in net_out, f'{cfg.input} not in {list(net_out.keys())}'
+            input = net_out[cfg.input]
+            if cfg.target == '*':
+                target = label
+            else:
+                target = label[cfg.target]
+            loss_val = loss_ins(input, target)
+            loss_val *= cfg.weight
+            assert cfg.name not in loss
+            loss[cfg.name] = loss_val
+            if loss_sum is None:
+                loss_sum = loss_val
+            else:
+                loss_sum += loss_val
+        return loss_sum, loss
 
 
 def wtire_summary(loss_map, tag='train', step=None):
@@ -280,14 +289,15 @@ def train(config):
         TrainEvalDataset(
             config.dataset(split='train', **config.dataset_parameter),
             config),
-        config.batch_size, True, num_workers=20)
+        config.batch_size, True, num_workers=0)
     test_loader = DataLoader(
         TrainEvalDataset(
             config.dataset(split='test', **config.dataset_parameter),
             config),
-        config.batch_size, False, num_workers=20)
+        config.batch_size, False, num_workers=0)
     net = NetModel(config.net)
-    net = nn.DataParallel(net)
+    loss_calculator = LossCalculator(config.net.loss)
+    # net = nn.DataParallel(net)
     logger.info(config.net.pre_train)
     logger.info(type(config.net.pre_train))
     if config.net.pre_train is not None and config.net.pre_train != 'None':
@@ -317,14 +327,22 @@ def train(config):
         net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
             image, label = batch
-            image = image.to(device)
+            logger.info(label)
+            if isinstance(image, torch.Tensor):
+                image = image.to(device)
+            elif isinstance(image, dict):
+                for k, v in image.items():
+                    if isinstance(v, torch.Tensor):
+                        image[k] = image[k].to(device)
+            elif isinstance(image, list):
+                for v in image:
+                    v.to(device)
             for k, v in label.items():
                 if isinstance(v, torch.Tensor):
                     label[k] = label[k].to(device)
             optimizer.zero_grad()
             net_out = net(image)
-            loss_sum, loss_map = calculate_loss(
-                config.net.loss, net_out, label)
+            loss_sum, loss_map = loss_calculator(net_out, label)
             loss_sum.backward()
             optimizer.step()
             global_step += 1
@@ -336,7 +354,7 @@ def train(config):
         buffer.seek(0)
         storage_dict[epoach] = buffer.read()
         storage_dict.commit()
-        test(config, net, test_loader, epoach)
+        test(config, net, test_loader, epoach, loss_calculator)
 
 
 class DCLCONFIG(util.bconfig.Config):
@@ -357,9 +375,11 @@ class DCLCONFIG(util.bconfig.Config):
             weight = util.bconfig.Value(1)
             loss_type = util.bconfig.ValueMap(
                 'cross_entropy',
-                cross_entropy=nn.CrossEntropyLoss(),
-                smooth_l1_loss=nn.SmoothL1Loss(),
+                cross_entropy=nn.CrossEntropyLoss,
+                smooth_l1_loss=nn.SmoothL1Loss,
+                yolo=model.dark_53.YoloLoss,
             )
+            loss_parameters=util.bconfig.Value({})
 
         class OutputsDef(util.bconfig.Config):
             layer_parameters = util.bconfig.Value({})
@@ -367,7 +387,7 @@ class DCLCONFIG(util.bconfig.Config):
             name_output = util.bconfig.Value('level_ce')
             model = util.bconfig.ValueMap(
                 'fc', fc=nn.Linear, softmax=nn.Softmax,
-                relu=nn.ReLU,
+                relu=nn.ReLU, conv=nn.Conv2d,
             )
 
         basenet = util.bconfig.ValueMap('resnet', **model.models)

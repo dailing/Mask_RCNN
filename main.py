@@ -30,12 +30,18 @@ class ImageStorage(BaseModel):
 	md5 = TextField(unique=True)
 	payload = BlobField()
 	timestamp = DateTimeField(default=datetime.datetime.now)
+	# session_id = IntegerField(default=0)
 
 
 class ImageAnnotation(BaseModel):
 	timestamp = DateTimeField(default=datetime.datetime.now)
 	points = JSONField(null=True)
-	image_id = IntegerField(unique=True)
+	image_id = IntegerField()
+	class_id = IntegerField(default=0)
+	# session_id = IntegerField(default=0)
+
+class Session(BaseModel):
+	session_name = TextField(default='_')
 
 
 try:
@@ -192,7 +198,7 @@ def api_add_annotation():
 	app.logger.info(data)
 	img_id = int(data['image_url'].split('/')[-1])
 	img_record, is_new_rec = ImageAnnotation.get_or_create(
-		image_id = img_id, 
+		image_id = img_id,
 	)
 	img_record.points = data['points']
 	img_record.save()

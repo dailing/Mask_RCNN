@@ -143,9 +143,15 @@ var app = new Vue({
                 this.secondPoint[0]/this.canvas.width,
                 this.secondPoint[1]/this.canvas.height,
             ];
+            point = [
+                (this.firstPoint[0] + this.secondPoint[0]) / 2 / this.canvas.width,
+                (this.firstPoint[1] + this.secondPoint[1]) / 2 / this.canvas.height,
+                Math.abs(this.firstPoint[0] - this.secondPoint[0]) / 2 / this.canvas.width,
+                Math.abs(this.firstPoint[1] - this.secondPoint[1]) / 2 / this.canvas.height,
+            ]
             post_data = {
                 image_url: this.image.src,
-                points: [fp, sp],
+                points: point,
             }
             console.log(post_data)
             Vue.http.post('/api/add_annotation', post_data)
