@@ -144,10 +144,10 @@ var app = new Vue({
                 this.secondPoint[1]/this.canvas.height,
             ];
             point = [
-                (this.firstPoint[0] + this.secondPoint[0]) / 2 / this.canvas.width,
                 (this.firstPoint[1] + this.secondPoint[1]) / 2 / this.canvas.height,
-                Math.abs(this.firstPoint[0] - this.secondPoint[0]) / 2 / this.canvas.width,
+                (this.firstPoint[0] + this.secondPoint[0]) / 2 / this.canvas.width,
                 Math.abs(this.firstPoint[1] - this.secondPoint[1]) / 2 / this.canvas.height,
+                Math.abs(this.firstPoint[0] - this.secondPoint[0]) / 2 / this.canvas.width,
             ]
             post_data = {
                 image_url: this.image.src,

@@ -297,10 +297,10 @@ def train(config):
         config.batch_size, False, num_workers=0)
     net = NetModel(config.net)
     loss_calculator = LossCalculator(config.net.loss)
-    # net = nn.DataParallel(net)
+    net = nn.DataParallel(net)
     logger.info(config.net.pre_train)
     logger.info(type(config.net.pre_train))
-    if config.net.pre_train is not None and config.net.pre_train != 'None':
+    if config.net.pre_train is not None and os.path.exists(config.net.pre_train):
         unused, unused1 = net.load_state_dict(
             {(('module.base_net.'+k) if not
                 k.startswith('module.base_net') else k): v
@@ -309,7 +309,7 @@ def train(config):
         logger.info(unused)
         logger.info(unused1)
     net = net.to(device)
-    optimizer = SGD(net.parameters(), 0.01, 0.9)
+    optimizer = SGD(net.parameters(), 0.0001, 0.9)
     exp_lr_scheduler = lr_scheduler.ExponentialLR(optimizer, 0.95)
 
     storage_dict = SqliteDict(f'{config.output_dir}/dcl_snap.db')
@@ -327,7 +327,6 @@ def train(config):
         net.train()
         for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
             image, label = batch
-            logger.info(label)
             if isinstance(image, torch.Tensor):
                 image = image.to(device)
             elif isinstance(image, dict):
@@ -377,7 +376,7 @@ class DCLCONFIG(util.bconfig.Config):
                 'cross_entropy',
                 cross_entropy=nn.CrossEntropyLoss,
                 smooth_l1_loss=nn.SmoothL1Loss,
-                yolo=model.dark_53.YoloLoss,
+                yolo=model.dark_53.YOLOLayer,
             )
             loss_parameters=util.bconfig.Value({})
 

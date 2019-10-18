@@ -220,10 +220,10 @@ class BaseResnet(ResNet):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-
+        fmap = x
         x = self.avgpool(x)
         x = x.reshape(x.size(0), -1)
-        return dict(feature=x)
+        return dict(feature=x, feature_map=fmap)
 
 
 class ResNet50(BaseResnet):
