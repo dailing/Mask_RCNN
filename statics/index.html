@@ -8,71 +8,101 @@
 
     <link rel="stylesheet" href="bootstrap.min.css">
 
-    <script src="vue.js"></script>
-    <script src="vue-resource@1.5.1"></script>
-    <script src="vue-async-computed"></script>
 </head>
 <body>
 
 
 <div id="app">
-    <div class="sticky-top">
+    <div class="sticky-top bg-light">
         <div class="container">
-        <div class="row">
-            <canvas 
-                id="canvas"
-                width="400"
-                height="400"
-                style="background-color:#aa3333">
-            </canvas>
-            <input 
-                type="button"
-                class="btn btn-light col-12"
-                value="submit"
-                v-on:click=submit_anno()>
-        </div>
+            <div class='row border'>
+                <div class="dropdown col-6">
+                    <button class="btn btn-secondary dropdown-toggle" 
+                            type="button" id="dropdownMenuButton"
+                            data-toggle="dropdown" aria-haspopup="true"
+                            aria-expanded="false">
+                        {{current_session.session_name}}
+                    </button>
+                    <div class="dropdown-menu" aria-labelledby="dropdownMenuButton">
+                        <a 
+                            class="dropdown-item" href="#" 
+                            v-for="session in sessions"
+                            v-on:click="current_session=session">
+                                {{session.session_name}}
+                        </a>
+                    </div>
+                </div>
+                <div class="input-group col-6">
+                    <input type="text" class="form-control" placeholder="session name" 
+                        aria-label="session name" v-model='new_session_name'>
+                    <div class="input-group-append">
+                        <button class="btn btn-primary"
+                                v-on:click="add_session()" >
+                            add
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="row border">
+                <div class="col-12">
+                    <canvas 
+                        id="canvas"
+                        width="400"
+                        height="400"
+                        style="background-color:#aa3333">
+                    </canvas>
+                </div>
+                <div class="col-2">
+                    <input 
+                        type="button"
+                        class="btn btn-primary"
+                        value="submit"
+                        v-on:click=submit_anno()>
+                </div>
+                <div class="col-2">
+                    <input 
+                        type="button"
+                        class="btn btn-primary"
+                        value="add box"
+                        v-on:click='adding_box=true'>
+                </div>
+            </div>
+            <div class="row">
+                <label class="col-3 col-form-label">upload images</label>
+                <input type="file"
+                        class="form-control-file col-3"
+                        accept="image/*"
+                        capture="camera"
+                        ref="new_file_element"
+                        v-on:change="file_to_upload = $event.target.files || $event.dataTransfer.files"
+                        multiple webkitdirectory/>
+                <button class="col-3 btn btn-primary" v-on:click='submit()'>
+                    submit
+                </button>
+            </div>
         </div>
     </div>
 
     <div class="container">
-    <div class="row">
-        <h5 class="col-12"> Upload Images </h5>
-        <label class="col-12 col-form-label">input image</label>
-        <input type="file"
-                class="form-control-file col-12"
-                accept="image/*"
-                capture="camera"
-                ref="new_file_element"
-                v-on:change="file_to_upload = $event.target.files || $event.dataTransfer.files"
-                multiple webkitdirectory/>
-        <input type="button"
-                class="col-12 btn btn-light"
-                v-on:click="submit_anno()"
-                value="submit result"
-        >
-    </div>
-    </div>
-    <div class="container">
         <div class="row">
-            <div class="card" style="width: 18rem;" v-for="img_url in images_this_page">
-                <img v-bind:src="img_url" class="card-img-top" alt="...">
+            <div class="card" style="width: 18rem;" v-for="(record) in images_this_page">
+                <img v-bind:src="record.url" class="card-img-top" alt="...">
                 <div class="card-body">
-                    <!-- <h5 class="card-title" v-bind:href="img_url">original Image</h5> -->
-                    <a class="card-text" v-bind:href="img_url">original Image</a>
+                    <a class="card-text" v-bind:href="record.url">original Image</a>
                 </div>
-                <a class="btn btn-primary" v-on:click='handleNewImage(img_url)'>annotate</a>
+                <a class="btn btn-primary" v-on:click='handleNewImage(record)'>annotate</a>
             </div>
         </div>
         <div>
             <button  
                 class="btn btn-light"
-                v-on:click="current_page=Math.max(current_page-1,1), update_image()">
+                v-on:click="current_page=Math.max(current_page-1,1)">
                 prev
             </button>
             <a>{{current_page}}/{{num_page}}</a>
             <button
                 class="btn btn-light"
-                v-on:click="current_page=Math.min(current_page+1,num_page);update_image()">
+                v-on:click="current_page=Math.min(current_page+1,num_page)">
                 next
             </button>
         </div>
@@ -80,8 +110,11 @@
 </div>
 
 
-      
+<script src="vue.js"></script>
+<script src="vue-resource@1.5.1"></script>
+<script src="vue-async-computed"></script>
 <script src="jquery-3.3.1.slim.min.js"></script>
+<script src="popper.min.js"></script>
 <script src="popper.min.js"></script>
 <script src="bootstrap.min.js"></script>
 <script src="index.js"></script>

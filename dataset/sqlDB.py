@@ -39,7 +39,7 @@ class SqlDB(Dataset):
                 iid,
                 i['class_id'],
                 *i['points']), dtype=np.float32))
-        for k,v in self.annotations.items():
+        for k, v in self.annotations.items():
             assert len(v['detection']) <= self.max_box
             while len(v['detection']) < self.max_box:
                 v['detection'].append(np.array((-1,-1,-1,-1,-1,-1), np.float32))

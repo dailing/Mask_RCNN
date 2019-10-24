@@ -4,7 +4,7 @@ import json
 from base64 import b64decode
 import cv2
 import numpy as np
-from dcl import get_configure, TrainEvalDataset
+from dcl import TrainEvalDataset, DCLCONFIG
 from util.tasks import Task
 from util.augment import ImageReader
 from torch.utils.data import Dataset, DataLoader
@@ -13,6 +13,7 @@ from dcl import NetModel
 import torch.nn as nn
 import torch
 from PIL import Image
+import requests
 
 
 class DummyData(Dataset):
@@ -58,19 +59,25 @@ class Predictor(MServiceInstance):
         self.o_dataset = DummyData()
         self.dataset = TrainEvalDataset(self.o_dataset, self.config)
         self.dataloader = DataLoader(
-            self.dataset, num_workers=0, shuffle=False, batch_size=4)
+            self.dataset, num_workers=0, shuffle=False, batch_size=1)
         self.dataloader_iter = self.dataloader.__iter__()
         self.net = net
         self.net.eval()
         self.reader = ImageReader()
 
     def _read(self, fname):
-        image = np.array(Image.open(open(fname, 'rb')))
+        if fname.startswith('http://'):
+            resp = requests.get(fname)
+            assert resp.status_code == 200
+            image = cv2.imdecode(np.frombuffer(resp.content, np.uint8), cv2.IMREAD_ANYCOLOR)
+        else:
+            image = cv2.imdecode(np.frombuffer(open(fname, 'rb').read(), np.uin), cv2.IMREAD_ANYCOLOR)
         if len(image.shape) < 2:
             return self.__getitem__(index-1)
         if len(image.shape) != 3:
             image = np.stack((image, image, image), axis=2)
         image = image[:, :, :3]
+        # image[:, :, 0], image[:, :, 2] = image[:, :, 2], image[:, :, 0]
         return image
 
     def __call__(self, arg):
@@ -86,21 +93,22 @@ class Predictor(MServiceInstance):
             logger.error(f'FUCK the arg is {type(arg)}')
         result = []
         for img in arg:
-            images = []
-            i_mid = img.shape[0] // 2
-            j_mid = img.shape[1] // 2
-            images.append(img[:i_mid, :j_mid, :])
-            images.append(img[:i_mid, j_mid:, :])
-            images.append(img[i_mid:, :j_mid, :])
-            images.append(img[i_mid:, j_mid:, :])
-            self.o_dataset.set_data(images)
+            # images = []
+            # i_mid = img.shape[0] // 2
+            # j_mid = img.shape[1] // 2
+            # images.append(img[:i_mid, :j_mid, :])
+            # images.append(img[:i_mid, j_mid:, :])
+            # images.append(img[i_mid:, :j_mid, :])
+            # images.append(img[i_mid:, j_mid:, :])
+            self.o_dataset.set_data([img])
             img, _ = self.dataloader_iter.__next__()
             logger.info(img.shape)
             net_result = self.net(img)
-            for k in net_result.keys():
-                net_result[k] = nn.functional.softmax(net_result[k], 1)[:, 1].\
-                    detach().cpu().numpy().tolist()
-            logger.info(net_result)
+            
+            # for k in net_result.keys():
+            #     net_result[k] = nn.functional.softmax(net_result[k], 1)[:, 1].\
+            #         detach().cpu().numpy().tolist()
+            # logger.info(net_result)
             result.append(net_result)
         return result
 
@@ -136,8 +144,9 @@ def process_data(data):
             process_data(v)
 
 
-config = get_configure()
-config.from_yaml('config_files/quater.yaml')
+config = DCLCONFIG.build()
+config.from_yaml('config_files/yolo_test.yaml')
+config.parse_args()
 pp = Predictor(config)
 pp.init_env()
 
@@ -181,4 +190,4 @@ def serve(taskname):
 
 
 if __name__ == "__main__":
-    resp = pp('../data/annotation4/images/20170313_709_张文彪_0848504596_R')
+    resp = pp('../../data/annotation4/images/20170313_709_张文彪_0848504596_R')

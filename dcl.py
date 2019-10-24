@@ -47,7 +47,7 @@ class NetModel(nn.Module):
 
     def forward(self, x):
         values = self.base_net(x)
-        outputs = values
+        outputs = {}
         for i in self.config.outputs:
             layer = self.__getattr__(i.name_output)
             assert i.name_input in values, \
@@ -387,6 +387,8 @@ class DCLCONFIG(util.bconfig.Config):
             model = util.bconfig.ValueMap(
                 'fc', fc=nn.Linear, softmax=nn.Softmax,
                 relu=nn.ReLU, conv=nn.Conv2d,
+                yolo=model.dark_53.YOLOLayer,
+                yolo_box=model.dark_53.YOLO2Boxes,
             )
 
         basenet = util.bconfig.ValueMap('resnet', **model.models)
@@ -407,7 +409,7 @@ class DCLCONFIG(util.bconfig.Config):
     dataset_parameter = util.bconfig.Value({})
     net = NetDef()
     output_dir = util.bconfig.Value('log/')
-    input_size = util.bconfig.Value(224)
+    # input_size = util.bconfig.Value(224)
     cmd = util.bconfig.Value('train')
     config = util.bconfig.Value('configure.yaml')
     max_it = util.bconfig.Value(14)

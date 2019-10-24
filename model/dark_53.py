@@ -215,7 +215,7 @@ def build_targets(pred_boxes, pred_cls, target, anchors, ignore_thres):
     target[:,0] = instance_map
     target = target[target[:,1]>-1, ...]
 
-    logger.info(target)
+    # logger.info(target)
     target_boxes = target[:, 2:6] * FloatTensor(nG+nG)
     gxy = target_boxes[:, :2]
     gwh = target_boxes[:, 2:]
@@ -234,10 +234,6 @@ def build_targets(pred_boxes, pred_cls, target, anchors, ignore_thres):
     # Set noobj mask to zero where iou exceeds ignore threshold
     logger.info(f'{ious.shape}, {gi.shape}, {gi}, {gj}')
     for i, anchor_ious in enumerate(ious.t()):
-        # logger.info(anchor_ious.shape)
-        # logger.info(ignore_thres)
-        # logger.info(noobj_mask.shape)
-        # logger.info(anchor_ious > torch.FloatTensor(ignore_thres))
         noobj_mask[b[i], anchor_ious > ignore_thres, gj[i], gi[i]] = 0
 
     # Coordinates
@@ -274,7 +270,7 @@ class YOLOLayer(nn.Module):
         self.mse_loss = nn.MSELoss()
         self.bce_loss = nn.BCELoss()
         self.obj_scale = 1
-        self.noobj_scale = 1
+        self.noobj_scale = 100
         self.metrics = {}
         self.stride = stride
         self.grid_size = (-1, -1)  # grid size
@@ -285,11 +281,11 @@ class YOLOLayer(nn.Module):
         FloatTensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
         # self.stride = self.img_dim / self.grid_size
         # Calculate offsets for each grid
-        self.grid_x = torch.arange(g[0]).repeat(g[1], 1).view([1, 1, g[0], g[1]]).type(FloatTensor)
-        self.grid_y = torch.arange(g[1]).repeat(g[0], 1).t().contiguous().view([1, 1, g[0], g[1]]).type(FloatTensor)
+        self.grid_y = torch.arange(g[1]).repeat(g[0], 1).view([1, 1, g[0], g[1]]).type(FloatTensor)
+        self.grid_x = torch.arange(g[0]).repeat(g[1], 1).t().contiguous().view([1, 1, g[0], g[1]]).type(FloatTensor)
 
         self.scaled_anchors = FloatTensor([(a_w * self.grid_size[0], a_h * self.grid_size[1]) for a_w, a_h in self.anchors])
-        logger.info(f'\n{self.scaled_anchors}')
+        # logger.info(f'\n{self.scaled_anchors}')
         self.anchor_w = self.scaled_anchors[:, 0:1].view((1, self.num_anchors, 1, 1))
         self.anchor_h = self.scaled_anchors[:, 1:2].view((1, self.num_anchors, 1, 1))
 
@@ -330,9 +326,9 @@ class YOLOLayer(nn.Module):
         pred_boxes[..., 3] = torch.exp(h.data) * self.anchor_h
 
         output = (
-                pred_boxes.view(num_samples, -1, 4) * self.stride,
-                pred_conf.view(num_samples, -1, 1),
-                pred_cls.view(num_samples, -1, self.num_classes),
+                pred_boxes.detach().cpu().numpy() / np.array(self.grid_size + (self.grid_size)),
+                pred_conf.detach().cpu().numpy(),
+                pred_cls.detach().cpu().numpy(),
         )
 
         if targets is None:
@@ -395,110 +391,26 @@ class YOLOLayer(nn.Module):
             return total_loss
 
 
-class YoloLoss(nn.Module):
-    def __init__(
-            self,
-            anchors=[],
-            num_class=1):
-        super(YoloLoss, self).__init__()
-        self.anchors = anchors
-        self.num_class = num_class
-        self.ignore_thres = 0.5
-    
-    def forward(self, x, target):
-        target = torch.cat(target, dim=0)
-        target = target.to(x.device)
-        instance_map = torch.cat([
-            torch.arange(nBatch, dtype=torch.float32) 
-            for _ in range(int(target.size(0) / nBatch))])
-        target[:,0] = instance_map
-        target = target[target[:,1]>-1, ...]
-
-        nBatch = x.size(0)
-        nAnchor = len(self.anchors) // 2
-        nClass = self.num_class
-        nRow = x.size(-2)
-        nCol = x.size(-1)
-        assert x.size(1) == len(self.anchors) * (self.num_class + 5), \
-            f"expected channels is: {len(self.anchors) * (self.num_class + 5)}, got {x.size(1)}"
-        # x should be: batch_size, anchors, class+x,y,h,w,
-        x = x.view(x.size(0), len(self.anchors), x.size(2), x.size(3), (self.num_class+5))
-
-        ByteTensor = torch.cuda.ByteTensor if x.is_cuda else torch.ByteTensor
-        FloatTensor = torch.cuda.FloatTensor if x.is_cuda else torch.FloatTensor
-
-        # Output tensors
-        obj_mask = ByteTensor(nBatch, nAnchor, nRow, nCol).fill_(0)
-        noobj_mask = ByteTensor(nBatch, nAnchor, nRow, nCol).fill_(1)
-        class_mask = FloatTensor(nBatch, nAnchor, nRow, nCol).fill_(0)
-        iou_scores = FloatTensor(nBatch, nAnchor, nRow, nCol).fill_(0)
-        tx = FloatTensor(nBatch, nAnchor, nRow, nCol).fill_(0)
-        ty = FloatTensor(nBatch, nAnchor, nRow, nCol).fill_(0)
-        tw = FloatTensor(nBatch, nAnchor, nRow, nCol).fill_(0)
-        th = FloatTensor(nBatch, nAnchor, nRow, nCol).fill_(0)
-        tcls = FloatTensor(nBatch, nAnchor, nRow, nCol, nClass).fill_(0)
-
-        logger.info(instance_map)
-        # target[:,0] = instance_map
-        instance_map = instance_map.long()
-        # target is: image_index, class_index, x,y,w,h
-        # arow, acol = x.size(2), x.size(3)
+class YOLO2Boxes(nn.Module):
+    def __init__(self):
+        super(YOLO2Boxes, self).__init__()
 
 
-        logger.info(x.shape)
-        logger.info(f'\n{target}')
+    def __call__(self, x):
+        box, conf, cls = x
+        boxes = np.where(conf > 0.5)
 
-        image_id = target[:,0].long()
-        logger.info(image_id)
-        class_id = target[:,1].long()
-        grid_scale = FloatTensor([nRow, nCol])
-        target_xy = target[:,2:4] * grid_scale
-        target_wh = target[:,4:6] * grid_scale
+        box_ax = box[boxes]  # n_box * 4
+        cls_raw = cls[boxes]
+        cls_ax = cls_raw.argmax(axis=1)
+        conf_ax = conf[boxes] #
 
-        gx, gy = target_xy.t()
-        gw, gh = target_wh.t()
-        gi, gj = target_xy.long().t()
-
-
-        grid_xy = target_xy.long()
-        anchors = FloatTensor(self.anchors).view(len(self.anchors)//2, 2) * grid_scale
-        logger.info(f'\n{anchors}')
-        logger.info(f'\n{target_wh}')
-
-
-        # ious should be: nAnchor*nBox
-        ious = torch.stack([bbox_wh_iou(anchor, target_wh) for anchor in anchors])
-        logger.info(f'\n{ious}')
-        # get best anchor for each box
-        best_ious, best_n = ious.max(0)
-        logger.info(best_ious)
-        logger.info(best_n)
-
-        logger.info(grid_scale)
-        logger.info(grid_xy)
-        obj_mask[image_id, best_n, gi, gj] = 1
-        noobj_mask[image_id, best_n, gi, gj] = 0
-
-        # logger.info(f'\n{obj_mask}')
-
-        for i, anchor_ious in enumerate(ious.t()):
-            noobj_mask[image_id[i], anchor_ious > self.ignore_thres, gi, gj] = 0
-
-        tx[instance_map, best_n, gi, gj] = gx - gx.floor()
-        ty[instance_map, best_n, gi, gj] = gy - gy.floor()
-
-        tw[instance_map, best_n, gi, gj] = torch.log(gw / anchors[best_n][:, 0] + 1e-16)
-        th[instance_map, best_n, gi, gj] = torch.log(gh / anchors[best_n][:, 1] + 1e-16)
-
-        tcls[instance_map, best_n, gi, gj, class_id] = 1
-        logger.info(gi)
-        logger.info(x.shape)
-        logger.info(x[instance_map, best_n, gi, gj].shape)
-        x[instance_map, best_n, gi, gj] 
-        logger.info(iou_scores[instance_map, best_n, gi, gj].shape) 
-        target[2:6]
-        iou_scores[instance_map, best_n, gi, gj] = bbox_iou(x[instance_map, best_n, gi, gj, class_id], target[2:6], x1y1x2y2=False)
-
-        return noobj_mask, obj_mask, tcls
-
-
+        result = []
+        for i in range(len(conf_ax)):
+            result.append(dict(
+                box_xywh=box_ax[i].tolist(),
+                cls_raw=cls_raw[i].tolist(),
+                cls_ax=int(cls_ax[i]),
+                conf=float(conf_ax[i]),
+            ))
+        return result
