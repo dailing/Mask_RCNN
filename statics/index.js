@@ -19,9 +19,10 @@ class Box {
         // 10: moving status
         // 20: resizing status
 
-        this.boder_range = 5
+        this.boder_range = 5;
         this.event = null;
         this.mouse_down_event = null;
+        this.record = null;
     }
 
     get top_left() {
@@ -52,7 +53,7 @@ class Box {
     }
 
     get bbox() {
-        return [this.x, this.y, this,this.width, this.height];
+        return [this.x, this.y, this.width, this.height];
     }
 
     get _in() {
@@ -97,14 +98,16 @@ class Box {
             if (event.type == 'mousemove'){}
             if (event.type == 'mouseup'){}
             if (event.type == 'mousedown'){
-                if (this._boder) {
-                    this.status = 20;
-                    this.mouse_down_event = event;
-                    block_event = true;
-                } else if (this._in) {
-                    this.status = 10;
-                    this.mouse_down_event = event;
-                    block_event = true;
+                if(this._in){
+                    if (this._boder) {
+                        this.status = 20;
+                        this.mouse_down_event = event;
+                        block_event = true;
+                    } else {
+                        this.status = 10;
+                        this.mouse_down_event = event;
+                        block_event = true;
+                    }
                 }
             }
             break;
@@ -127,7 +130,6 @@ class Box {
         };
         return block_event;
     }
-
 }
 
 var app = new Vue({
@@ -146,7 +148,7 @@ var app = new Vue({
         current_image: null,
 
         current_page:1,
-        images_per_page:10,
+        images_per_page:9,
         num_page:0,
         images_this_page: [],
 
@@ -154,8 +156,16 @@ var app = new Vue({
         current_session:{"session_name":'null'},
 
         new_session_name: null,
+
+        show_existing_images: false,
     },
     methods: {
+        remove_selected: function(){
+            console.info('delete box');
+            if (this.selected_box < 0) return;
+            this.boxes.splice(this.selected_box, 1);
+            this.selected_box = Math.min(this.selected_box, this.boxes.length-1);
+        },
         update_session : function(){
             Vue.http.get(
                 '/api/sessions').
@@ -176,6 +186,15 @@ var app = new Vue({
                 this.update_session();
             })
         },
+        _add_boxes: function(box_xywh) {
+            var box = new Box();
+            box.x = box_xywh[1] * this.canvas.width;
+            box.width = box_xywh[3] * this.canvas.width;
+            box.y = box_xywh[0] * this.canvas.height;
+            box.height = box_xywh[2] * this.canvas.height;
+            this.boxes.push(box);
+            return box;
+        },
         handleNewImage: function (record) {
             this.current_image = record;
             // set image
@@ -191,33 +210,61 @@ var app = new Vue({
             img.src = url;
             this.image = img;
             // add boxes
-            Vue.http.get()
+            if(this.show_existing_images){
+                Vue.http.get(
+                    '/api/annotation/' + this.current_image.id
+                ).then(response => {
+                    console.log(response.data);
+                    app.boxes = [];
+                    for(var i=0; i < response.data.length; i += 1){
+                        var box = app._add_boxes(response.data[i].points)
+                        box.record = response.data[i];
+                    }
+                    app.render();
+                })
+            } else {
+                Vue.http.get(
+                    '/api/get_result/' + this.current_image.id
+                ).then(response => {
+                    console.log(response.data);
+                    app.boxes = [];
+                    for(var i=0; i < response.data.result.length; i += 1){
+                        console.info(response.data.result[i])
+                        var box = app._add_boxes(response.data.result[i].box_xywh)
+                        box.detect = response.data[i];
+                    }
+                    app.render();
+                });
+            }
         },
         render: function () {
             if (this.image != null) {
-                this.canvas.height = Math.floor(this.canvas.width / this.image.width * this.image.height)
+                this.canvas.height = Math.floor(this.canvas.width / this.image.width * this.image.height);
                 this.ctx.drawImage(this.image, 0, 0, this.canvas.width, this.canvas.height);
             }
             for(var i=0; i < this.boxes.length; i += 1){
+                this.ctx.save();
                 this.ctx.strokeStyle = "green";
                 if (this.current_box <0) {
                     if (this.boxes[i]._boder) {
                         this.ctx.strokeStyle = 'red';
                     } else if (this.boxes[i]._in){
                         this.ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
-                        this.ctx.fillRect(
-                            ...this.boxes[i].top_left
-                        );        
+                        this.ctx.fillRect(...this.boxes[i].top_left);
                     }
+                }
+                if (this.selected_box == i){
+                    this.ctx.setLineDash([2, 2]);
                 }
                 this.ctx.strokeRect(
                     ...this.boxes[i].top_left
                 );
+                this.ctx.restore();
             }
         },
-        handle_mouse_event(event){
+        handle_mouse_event (event) {
             if (this.adding_box){
-            if(event.type == 'mousedown'){
+            if (event.type == 'mousedown'){
                 console.log(event);
                 this.adding_box = false;
                 newbox = new Box();
@@ -233,14 +280,13 @@ var app = new Vue({
                 for(var i = 0; i < this.boxes.length; i += 1){
                     if (this.boxes[i].handleEvent(event)){
                         this.current_box = i;
-                        console.log('set box to ' + this.current_box);
+                        this.selected_box = i;
                         break;
                     }
                 }
             } else {
                 if (!this.boxes[this.current_box].handleEvent(event)) {
                     this.current_box = -1;
-                    console.log('set box to ' + this.current_box);
                 }
             }
             event.preventDefault();
@@ -270,37 +316,77 @@ var app = new Vue({
         },
         submit_anno: function() {
             console.log('submit annotation');
-            fp = [
-                this.firstPoint[0]/this.canvas.width,
-                this.firstPoint[1]/this.canvas.height,
-            ];
-            sp = [
-                this.secondPoint[0]/this.canvas.width,
-                this.secondPoint[1]/this.canvas.height,
-            ];
-            point = [
-                (this.firstPoint[1] + this.secondPoint[1]) / 2 / this.canvas.height,
-                (this.firstPoint[0] + this.secondPoint[0]) / 2 / this.canvas.width,
-                Math.abs(this.firstPoint[1] - this.secondPoint[1]) / 2 / this.canvas.height,
-                Math.abs(this.firstPoint[0] - this.secondPoint[0]) / 2 / this.canvas.width,
-            ]
-            post_data = {
-                image_url: this.image.src,
-                points: point,
+            var post_data = [];
+            for (var i = 0; i < this.boxes.length; i += 1) {
+                var bbox = this.boxes[i].bbox;
+                bbox[0] /= this.canvas.width;
+                bbox[2] /= this.canvas.width;
+                bbox[1] /= this.canvas.height;
+                bbox[3] /= this.canvas.height;
+                bbox = [bbox[1], bbox[0], bbox[3], bbox[2]];
+                var rec = null;
+                if (this.boxes[i].record != null) {
+                    rec = this.boxes[i].record;
+                    rec.points = bbox;
+                }else{
+                    rec = {
+                        image_id: this.current_image.id,
+                        session_name: this.current_image.session_name,
+                        points: bbox,
+                    };
+                }
+                post_data.push(rec);
             }
-            console.log(post_data)
-            Vue.http.post('/api/add_annotation', post_data)
-        }
-    },
-    asyncComputed: {
-        images_this_page() {
-            Vue.http.get('/api/image_list/'+this.current_session.session_name+'/'+this.current_page+'/'+this.images_per_page)
+            if (post_data.length == 0){
+                post_data.push({
+                    image_id: this.current_image.id,
+                    session_name: this.current_image.session_name,
+                    points: [-1,-1,-1,-1],
+                });
+            }
+            console.log(post_data);
+            Vue.http.post('/api/annotation', post_data).then(
+                response => {
+                    console.log(response.data);
+                    app._update_images_this_page();
+                }, response => {
+                    console.log(response.data);
+                }
+            );
+        },
+        _keyboard_event: function(event){
+            console.log(event);
+            if(event.key == "d"){
+                this.remove_selected();
+            } else if(event.key == 'a'){
+                this.adding_box = true;
+            } else if(event.key == 's'){
+                this.adding_box = false;
+            } else if(event.key == 'q'){
+                this.selected_box = (this.selected_box + 1) % this.boxes.length;
+            } else if(event.key == 'w'){
+                this.submit_anno();
+            }
+            this.render();
+        },
+        _update_images_this_page(){
+            var url = '/api/image_list/'+this.current_session.session_name+'/'+this.current_page+'/'+this.images_per_page;
+            if (this.show_existing_images){
+                url = '/api/image_list_existing/'+this.current_session.session_name+'/'+this.current_page+'/'+this.images_per_page;
+            }
+            Vue.http.get(url)
             .then(response => {
                 console.log(response.data);
                 this.num_page = response.data.num_page;
                 this.images_this_page = response.data.result;
+                this.handleNewImage(this.images_this_page[0]);
                 return response.data.result;
             })
+        }
+    },
+    asyncComputed: {
+        images_this_page() {
+            this._update_images_this_page();
         },
     },
     computed: {
@@ -308,7 +394,6 @@ var app = new Vue({
     },
     watch: {
         // image_to_annotate: function(val) {
-            
         // }
     },
     mounted() {
@@ -318,6 +403,9 @@ var app = new Vue({
         this.canvas.onmousemove = this.handle_mouse_event;
         this.canvas.oncontextmenu=this.n;
         this.ctx = this.canvas.getContext('2d');
+        document.addEventListener("keydown", function(event){
+            app._keyboard_event(event);
+        }, false);
         this.update_session();
         console.log('init!')
     }

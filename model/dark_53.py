@@ -189,6 +189,7 @@ def build_targets(pred_boxes, pred_cls, target, anchors, ignore_thres):
 
     ByteTensor = torch.cuda.ByteTensor if pred_boxes.is_cuda else torch.ByteTensor
     FloatTensor = torch.cuda.FloatTensor if pred_boxes.is_cuda else torch.FloatTensor
+    LongTensor = torch.cuda.LongTensor if pred_boxes.is_cuda else torch.LongTensor
 
     nB = pred_boxes.size(0)
     nA = pred_boxes.size(1)
@@ -232,7 +233,7 @@ def build_targets(pred_boxes, pred_cls, target, anchors, ignore_thres):
     noobj_mask[b, best_n, gj, gi] = 0
 
     # Set noobj mask to zero where iou exceeds ignore threshold
-    logger.info(f'{ious.shape}, {gi.shape}, {gi}, {gj}')
+    # logger.info(f'{ious.shape}, {gi.shape}, {gi}, {gj}')
     for i, anchor_ious in enumerate(ious.t()):
         noobj_mask[b[i], anchor_ious > ignore_thres, gj[i], gi[i]] = 0
 
@@ -290,11 +291,11 @@ class YOLOLayer(nn.Module):
         self.anchor_h = self.scaled_anchors[:, 1:2].view((1, self.num_anchors, 1, 1))
 
     def forward(self, x, targets=None, img_dim=None):
-
+        # logger.info(f'{x.min()}, {x.max()}')
         # Tensors for cuda support
         FloatTensor = torch.cuda.FloatTensor if x.is_cuda else torch.FloatTensor
-        LongTensor = torch.cuda.LongTensor if x.is_cuda else torch.LongTensor
-        ByteTensor = torch.cuda.ByteTensor if x.is_cuda else torch.ByteTensor
+        # LongTensor = torch.cuda.LongTensor if x.is_cuda else torch.LongTensor
+        # ByteTensor = torch.cuda.ByteTensor if x.is_cuda else torch.ByteTensor
 
         self.img_dim = img_dim
         num_samples = x.size(0)
@@ -313,6 +314,8 @@ class YOLOLayer(nn.Module):
         h = prediction[..., 3]  # Height
         pred_conf = torch.sigmoid(prediction[..., 4])  # Conf
         pred_cls = torch.sigmoid(prediction[..., 5:])  # Cls pred.
+        # logger.info(f'{prediction[..., 4].min()}, {prediction[..., 4].max()}')
+        # logger.info(f'{pred_conf.min()}, {pred_conf.max()}')
 
         # If grid size does not match current we compute new offsets
         if not (grid_size == self.grid_size):
@@ -341,9 +344,8 @@ class YOLOLayer(nn.Module):
                 anchors=self.scaled_anchors,
                 ignore_thres=self.ignore_thres,
             )
-
-            logger.info(tw[obj_mask])
-            logger.info(w[obj_mask])
+            obj_mask = obj_mask.bool()
+            noobj_mask = noobj_mask.bool()
 
             # Loss : Mask outputs to ignore non-existing objects (except with conf. loss)
             loss_x = self.mse_loss(x[obj_mask], tx[obj_mask])
@@ -386,7 +388,7 @@ class YOLOLayer(nn.Module):
                 "conf_noobj": to_cpu(conf_noobj).item(),
                 "grid_size": grid_size,
             }
-            logger.info(self.metrics)
+            # logger.info(self.metrics)
 
             return total_loss
 
@@ -395,6 +397,41 @@ class YOLO2Boxes(nn.Module):
     def __init__(self):
         super(YOLO2Boxes, self).__init__()
 
+    def _iou(self, xywh1, xywh2):
+        box1 = [
+            xywh1[0]-xywh1[2] / 2, xywh1[1]-xywh1[3] / 2,
+            xywh1[0]+xywh1[2] / 2, xywh1[1]+xywh1[3] / 2,
+        ]
+        box2 = [
+            xywh2[0]-xywh2[2] / 2, xywh2[1]-xywh2[3] / 2,
+            xywh2[0]+xywh2[2] / 2, xywh2[1]+xywh2[3] / 2,
+        ]
+        inner = \
+            max(min(box1[2], box2[2])-max(box1[0], box2[0]), 0) *\
+            max(min(box1[3], box2[3])-max(box1[1], box2[1]), 0)
+        
+        outer = xywh1[2] * xywh1[3] + xywh2[2] * xywh2[3]
+        return inner / (outer - inner)
+
+    def _none_max_suppression(self, result):
+        class_dict = {}
+        for idx, i in enumerate(result):
+            cls_argmax = i['cls_argmax']
+            if not cls_argmax in class_dict:
+                class_dict[cls_argmax] = set()
+            class_dict[cls_argmax].add(idx)
+        
+        survived_elements = []
+        for result_each_class in class_dict.values():
+            while len(result_each_class) > 0:
+                current_idx = result_each_class.pop()
+                for ii in list(result_each_class):
+                    if self._iou(result[ii]['box_xywh'], result[current_idx]['box_xywh']) > 0.5:
+                        result_each_class.remove(ii)
+                        if result[ii]['conf'] > result[current_idx]['conf']:
+                            current_idx = ii
+                survived_elements.append(current_idx)
+        return [result[i] for i in survived_elements]
 
     def __call__(self, x):
         box, conf, cls = x
@@ -402,7 +439,7 @@ class YOLO2Boxes(nn.Module):
 
         box_ax = box[boxes]  # n_box * 4
         cls_raw = cls[boxes]
-        cls_ax = cls_raw.argmax(axis=1)
+        cls_argmax = cls_raw.argmax(axis=1)
         conf_ax = conf[boxes] #
 
         result = []
@@ -410,7 +447,8 @@ class YOLO2Boxes(nn.Module):
             result.append(dict(
                 box_xywh=box_ax[i].tolist(),
                 cls_raw=cls_raw[i].tolist(),
-                cls_ax=int(cls_ax[i]),
+                cls_argmax=int(cls_argmax[i]),
                 conf=float(conf_ax[i]),
             ))
+        result = self._none_max_suppression(result)
         return result

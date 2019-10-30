@@ -16,7 +16,7 @@
     <div class="sticky-top bg-light">
         <div class="container">
             <div class='row border'>
-                <div class="dropdown col-6">
+                <div class="dropdown col-3">
                     <button class="btn btn-secondary dropdown-toggle" 
                             type="button" id="dropdownMenuButton"
                             data-toggle="dropdown" aria-haspopup="true"
@@ -32,6 +32,13 @@
                         </a>
                     </div>
                 </div>
+                <div>
+                    <button 
+                        class="btn btn-primary"
+                        v-on:click="show_existing_images=!show_existing_images">
+                        {{show_existing_images?"existing":"new"}}
+                    </button>
+                </div>
                 <div class="input-group col-6">
                     <input type="text" class="form-control" placeholder="session name" 
                         aria-label="session name" v-model='new_session_name'>
@@ -45,11 +52,10 @@
             </div>
             <div class="row border">
                 <div class="col-12">
-                    <canvas 
-                        id="canvas"
-                        width="400"
-                        height="400"
-                        style="background-color:#aa3333">
+                    <canvas
+                        id="canvas" width="400" height="400"
+                        v-on:keydown:enter='remove_selected()'
+                        style="background-color:#590b8d">
                     </canvas>
                 </div>
                 <div class="col-2">
@@ -63,8 +69,8 @@
                     <input 
                         type="button"
                         class="btn btn-primary"
-                        value="add box"
-                        v-on:click='adding_box=true'>
+                        v-bind:value="adding_box==true ? 'adding': 'selecting'"
+                        v-on:click='adding_box=!adding_box'>
                 </div>
             </div>
             <div class="row">
@@ -86,11 +92,11 @@
     <div class="container">
         <div class="row">
             <div class="card" style="width: 18rem;" v-for="(record) in images_this_page">
-                <img v-bind:src="record.url" class="card-img-top" alt="...">
-                <div class="card-body">
+                <img v-bind:src="record.url" class="card-img-top" alt="..." v-on:click='handleNewImage(record);'>
+                <!-- <div class="card-body">
                     <a class="card-text" v-bind:href="record.url">original Image</a>
                 </div>
-                <a class="btn btn-primary" v-on:click='handleNewImage(record)'>annotate</a>
+                <a class="btn btn-primary" v-on:click='handleNewImage(record)'>annotate</a> -->
             </div>
         </div>
         <div>
@@ -99,7 +105,7 @@
                 v-on:click="current_page=Math.max(current_page-1,1)">
                 prev
             </button>
-            <a>{{current_page}}/{{num_page}}</a>
+            <a><input type="number" v-model='current_page' > /{{num_page}}</a>
             <button
                 class="btn btn-light"
                 v-on:click="current_page=Math.min(current_page+1,num_page)">

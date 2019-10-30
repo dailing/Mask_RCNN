@@ -1,7 +1,7 @@
 
 from flask import Flask, request, make_response, redirect
 from flask_restful import Resource, Api
-
+import os
 from util.logs import get_logger
 import cv2
 import numpy as np
@@ -17,6 +17,10 @@ import psycopg2
 import math
 import base64
 import uuid
+from peewee import fn
+import time
+
+import util.tasks as tasks
 
 
 psql_db = DatabaseProxy()
@@ -39,6 +43,26 @@ class ImageStorage(BaseModel):
             (('md5', 'session_name'), True),
         )
 
+	@staticmethod
+	def add_file(file_path, session_name):
+		if os.path.exists(file_path):
+			return ImageStorage.add_bytes(
+				open(file_path, 'rb').read(),
+				session_name)
+
+	@staticmethod
+	def add_bytes(payload, session_name):
+		md5_val = hashlib.md5(payload).hexdigest()
+		try:
+			result = ImageStorage.create(
+				payload=payload, md5=md5_val, session_name=session_name)
+		except IntegrityError as e:
+			psql_db.rollback()
+		except psycopg2.errors.UniqueViolation as e:
+			psql_db.rollback()
+
+
+
 
 class ImageAnnotation(BaseModel):
 	timestamp = DateTimeField(default=datetime.datetime.now)
@@ -46,6 +70,7 @@ class ImageAnnotation(BaseModel):
 	image_id = IntegerField()
 	class_id = IntegerField(default=0)
 	session_name = TextField()
+
 
 class Session(BaseModel):
 	session_name = TextField(
@@ -184,11 +209,35 @@ def serve_imageLength():
 
 
 @app.route('/api/image_list/<string:session_name>/<int:page>/<int:items_per_page>')
-def image_list(session_name=None, page=0, items_per_page=10):
-	length = ImageStorage.select().where(ImageStorage.session_name==session_name).count()
+def image_list_not_annotated(session_name=None, page=0, items_per_page=10):
+	query = (ImageStorage.session_name==session_name) & (ImageStorage.id.not_in(
+		ImageAnnotation.select(fn.DISTINCT(ImageAnnotation.image_id)),
+	))
+	length = ImageStorage.select().where(query).count()
 	result = ImageStorage.\
 		select(ImageStorage.id, ImageStorage.session_name).\
-		where(ImageStorage.session_name==session_name).\
+		where(query).\
+		order_by(ImageStorage.id).\
+		paginate(page, items_per_page).dicts()
+	result = list(result)
+	for i in result:
+		i['url'] = '/api/get_image_by_id/' + str(i['id'])
+	app.logger.info(result)
+	return dict(
+		result=result,
+		num_page=math.ceil(length / items_per_page),
+		current_page=page)
+
+
+@app.route('/api/image_list_existing/<string:session_name>/<int:page>/<int:items_per_page>')
+def image_list_annotated(session_name=None, page=0, items_per_page=10):
+	query = (ImageStorage.session_name==session_name) & (ImageStorage.id.in_(
+		ImageAnnotation.select(fn.DISTINCT(ImageAnnotation.image_id)),
+	))
+	length = ImageStorage.select().where(query).count()
+	result = ImageStorage.\
+		select(ImageStorage.id, ImageStorage.session_name).\
+		where(query).\
 		order_by(ImageStorage.id).\
 		paginate(page, items_per_page).dicts()
 	result = list(result)
@@ -212,18 +261,24 @@ def get_image_by_index(index):
 
 @app.route('/api/annotation/<int:img_id>', methods=['GET'])
 def api_get_annotation(img_id):
-	result = ImageAnnotation.select().\
+	result = ImageAnnotation.select(
+		ImageAnnotation.id,
+		ImageAnnotation.points,
+		ImageAnnotation.image_id,
+		ImageAnnotation.class_id,
+		ImageAnnotation.session_name).\
 			where(ImageAnnotation.image_id == img_id).\
 			dicts().\
 			execute()
-	app.logger.info(result)
-	return result
+	result = list(result)
+	logger.info(result)
+	return json.dumps(result)
 
 
-@app.route('/api/annotation/<int:img_id>', methods=['POST'])
-def api_set_or_add_annotation(img_id):
+@app.route('/api/annotation', methods=['POST'])
+def api_set_or_add_annotation():
 	reqs = request.json
-	if isinstance(req, dict):
+	if isinstance(reqs, dict):
 		reqs = [reqs]
 	for req in reqs:
 		logger.info(req)
@@ -234,7 +289,8 @@ def api_set_or_add_annotation(img_id):
 			for k, v in req.items():
 				setattr(rec, k, v)
 				rec.save()
-		app.logger.info()
+		app.logger.info(req)
+	return "OK"
 
 
 @app.route('/api/sessions', methods=['GET'])
@@ -255,6 +311,35 @@ def api_session():
 	logger.info(type(ss.__data__))
 	return ss.__data__
 
+
+@app.route('/api/get_result/<int:image_id>', methods=['GET'])
+def get_result(image_id):
+	img = ImageStorage.get_by_id(image_id)
+	img = cv2.imdecode(np.frombuffer(img.payload, np.uint8), cv2.IMREAD_ANYCOLOR)
+	tt = tasks.Task('mservice', redis_host='redis', redis_port=6379)
+
+	time_first = time.perf_counter()
+	result = tt.issue(img)
+	result = result.get()
+	result = result[0]
+	result = result['yolo_out_box']
+	logger.info(result)
+	rr = dict(result=result)
+	logger.info(rr)
+	logger.info(time.perf_counter() - time_first)
+	logger.info(rr)
+	return rr
+
+
+@app.route('/task/<string:taskname>', methods=['POST'])
+def call_tasks(taskname):
+	logger.info(f'calling task {taskname}')
+	logger.info(request.json)
+	logger.info(request.data)
+	# tt = tasks.Task(taskname, redis_host='redis', redis_port=6379)
+	# result = tt.issue(None)
+	# return result.get()
+	return "OK"
 
 
 if __name__ == "__main__":

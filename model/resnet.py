@@ -211,15 +211,18 @@ class BaseResnet(ResNet):
         super(BaseResnet, self).__init__(*args, **kwargs)
 
     def forward(self, x):
+        # print(f'214, {x.min()}, {x.max()}')
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
+        # print(f'219, {x.min()}, {x.max()}')
 
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
+        # print(f'225, {x.min()}, {x.max()}')
         fmap = x
         x = self.avgpool(x)
         x = x.reshape(x.size(0), -1)

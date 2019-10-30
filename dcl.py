@@ -289,12 +289,12 @@ def train(config):
         TrainEvalDataset(
             config.dataset(split='train', **config.dataset_parameter),
             config),
-        config.batch_size, True, num_workers=0)
+        config.batch_size, True, num_workers=1)
     test_loader = DataLoader(
         TrainEvalDataset(
             config.dataset(split='test', **config.dataset_parameter),
             config),
-        config.batch_size, False, num_workers=0)
+        config.batch_size, False, num_workers=1)
     net = NetModel(config.net)
     loss_calculator = LossCalculator(config.net.loss)
     net = nn.DataParallel(net)

@@ -14,6 +14,8 @@ import torch.nn as nn
 import torch
 from PIL import Image
 import requests
+import click
+import time
 
 
 class DummyData(Dataset):
@@ -93,22 +95,10 @@ class Predictor(MServiceInstance):
             logger.error(f'FUCK the arg is {type(arg)}')
         result = []
         for img in arg:
-            # images = []
-            # i_mid = img.shape[0] // 2
-            # j_mid = img.shape[1] // 2
-            # images.append(img[:i_mid, :j_mid, :])
-            # images.append(img[:i_mid, j_mid:, :])
-            # images.append(img[i_mid:, :j_mid, :])
-            # images.append(img[i_mid:, j_mid:, :])
             self.o_dataset.set_data([img])
             img, _ = self.dataloader_iter.__next__()
             logger.info(img.shape)
             net_result = self.net(img)
-            
-            # for k in net_result.keys():
-            #     net_result[k] = nn.functional.softmax(net_result[k], 1)[:, 1].\
-            #         detach().cpu().numpy().tolist()
-            # logger.info(net_result)
             result.append(net_result)
         return result
 
@@ -144,17 +134,17 @@ def process_data(data):
             process_data(v)
 
 
-config = DCLCONFIG.build()
-config.from_yaml('config_files/yolo_test.yaml')
-config.parse_args()
-pp = Predictor(config)
-pp.init_env()
+# config = DCLCONFIG.build()
+# config.from_yaml('config_files/yolo_test.yaml')
+# config.parse_args()
+# pp = Predictor(config)
+# pp.init_env()
 
 app = Flask(__name__)
 logger = get_logger('server logger')
-redis_host = 'localhost'
-app.config.from_object(FlaskConfig())
-logger.info('fuck')
+# redis_host = 'localhost'
+# app.config.from_object(FlaskConfig())
+# logger.info('fuck')
 
 
 @app.route("/")
@@ -189,5 +179,32 @@ def serve(taskname):
     return json.dumps(rr)
 
 
+@click.group()
+@click.option('--debug', default=False)
+def cli(debug):
+    pass
+
+
+@cli.command()
+@click.option('--config', default='config_files/yolo_test.yaml')
+@click.option('--taskname', default='mservice')
+@click.option('--redis_host', default='redis')
+@click.option('--redis_port', default=6379)
+def mservice(config, taskname, redis_host, redis_port):
+    cfg = DCLCONFIG.build()
+    cfg.from_yaml(config)
+    pp = Predictor(cfg)
+    pp.init_env()
+    tt = Task(taskname, redis_host, redis_port)
+    while True:
+        req, writer = tt.wait_for_task()
+        req_obj = req.get_pickle()
+        time_first = time.perf_counter()
+        result = pp(req_obj)
+        logger.info(time.perf_counter() - time_first)
+        writer.write_pickle(result)
+
+
 if __name__ == "__main__":
-    resp = pp('../../data/annotation4/images/20170313_709_张文彪_0848504596_R')
+    # resp = pp('../../data/annotation4/images/20170313_709_张文彪_0848504596_R')
+    cli()
