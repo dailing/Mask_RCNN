@@ -3,6 +3,8 @@ from .kaggle_dr import DRDataset
 from .cubbird import CUBBirdDataset
 from .mnist import Mnist
 from .sqlDB import SqlDB
+from .vessel_seg import DRIVE
+from .mnist_noise import MnistNoise
 
 datasets = dict(
     old_annotation=OldAnno,
@@ -10,4 +12,6 @@ datasets = dict(
     CUBBird=CUBBirdDataset,
     Mnist=Mnist,
     dql_db=SqlDB,
+    DRIVE=DRIVE,
+    MnistNoise=MnistNoise,
 )

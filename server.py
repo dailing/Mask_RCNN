@@ -99,6 +99,9 @@ class Predictor(MServiceInstance):
             img, _ = self.dataloader_iter.__next__()
             logger.info(img.shape)
             net_result = self.net(img)
+            for k, v in net_result.items():
+                if isinstance(v, torch.Tensor):
+                    net_result[k] = v.detach()
             result.append(net_result)
         return result
 
@@ -185,7 +188,7 @@ def cli(debug):
     pass
 
 
-@cli.command()
+@cli.command('start')
 @click.option('--config', default='config_files/yolo_test.yaml')
 @click.option('--taskname', default='mservice')
 @click.option('--redis_host', default='redis')

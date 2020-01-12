@@ -5,6 +5,8 @@ from .alexnet import AlexNet
 from .lenet import LeNet
 from .dark_53 import Darknet53
 from .identityLayer import IdentityNet
+from .deeplab_v3 import DeepLab
+from .experiment import ExperimentModel
 
 
 models = dict(
@@ -15,4 +17,6 @@ models = dict(
     alexnet=AlexNet,
     lenet=LeNet,
     darknet=Darknet53,
+    deeplab=DeepLab,
+    expModel=ExperimentModel,
 )

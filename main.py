@@ -1,4 +1,3 @@
-
 from flask import Flask, request, make_response, redirect
 from flask_restful import Resource, Api
 import os
@@ -11,7 +10,7 @@ from peewee import PostgresqlDatabase, Model, TextField,\
 	BlobField, DateTimeField, IntegerField, IntegrityError,\
 	DatabaseProxy
 import playhouse.db_url
-from playhouse.postgres_ext import JSONField
+from playhouse.postgres_ext import JSONField, ArrayField
 import datetime
 import psycopg2
 import math

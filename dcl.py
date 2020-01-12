@@ -26,6 +26,9 @@ import argparse
 from sklearn.metrics import average_precision_score, roc_auc_score
 import util.bconfig
 import model
+from model.deeplab_v3 import CrossEntropy2d
+import pickle
+from itertools import chain
 
 
 logger = get_logger('fff')
@@ -57,7 +60,7 @@ class NetModel(nn.Module):
             outputs[i.name_output] = out
         if self.with_feature:
             return outputs, values
-        return outputs
+        return values
 
 
 class TrainEvalDataset(Dataset):
@@ -144,6 +147,22 @@ def metrics_AP(output, label):
     return np.mean(list(AP.values()))
 
 
+def metrics_iou(output, label):
+    iou = {}
+    numClasses = output.shape[1]
+    prediction = np.argmax(output, axis=1)
+    logger.debug(f'shape is {prediction.shape}; {label.shape}')
+    for i in range(numClasses):
+        intersection = float(np.sum(np.logical_and(prediction == i, label == i)))
+        union = float(np.sum(np.logical_or(prediction == i, label == i)))
+        logger.debug(f'intersecton {intersection}, union {union}')
+        if union == 0:
+            iou[f'{i}'] = 1
+        else:
+            iou[f'{i}'] = intersection / union
+    return iou
+
+
 def metrics_mRoc(output, label):
     n_class = output.shape[1]
     mROC = {}
@@ -194,52 +213,69 @@ def test(config, net, data_loader, epoach, loss_calculator):
     test_metrix = calculate_metrics(config.metrics, cls_predict, cls_gt)
     logger.info(test_metrix)
     for k, v in test_metrix.items():
-        summery_writer.add_scalar(
-            f'metrics/{k}',
-            v,
-            epoach
-        )
+        if isinstance(v, dict):
+            summery_writer.add_scalars(
+                f'metrics/{k}',
+                v, epoach
+            )
+        elif isinstance(v, list):
+            summery_writer.add_scalars(
+                f'metrics/{k}',
+                {i: j for i, j in enumerate(v)},
+                epoach
+            )
+        else:
+            summery_writer.add_scalar(
+                f'metrics/{k}',
+                v,
+                epoach
+            )
 
 
-def predict(
-        config, dataset, model_file,
-        num_workers=10, batch_size=1, gpu=True):
-    predict_device = torch.device('cuda' if gpu else 'cpu')
+def predict(config):
+    device = torch.device('cuda')
     loader = DataLoader(
         TrainEvalDataset(
-            dataset,
+            config.dataset(split='train', **config.dataset_parameter),
             config),
-        batch_size=batch_size, shuffle=False,
-        num_workers=num_workers)
-    net = NetModel(config.net, with_feature=True)
-    net = nn.DataParallel(net)
-    unused = net.load_state_dict(
-        {(('module.base_net.'+k) if not
-            k.startswith('module.base_net') else k): v
-            for k, v in torch.load(model_file, map_location='cpu').items()},
-        strict=False)
-    logger.info(unused)
-    net = net.to(predict_device)
+        1000, False, num_workers=8)
+    test_loader = DataLoader(
+        TrainEvalDataset(
+            config.dataset(split='test', **config.dataset_parameter),
+            config),
+        1000, False, num_workers=8)
+    net = NetModel(config.net)
+    net = net.to(device)
+
+    storage_dict = SqliteDict(f'{config.output_dir}/dcl_snap.db')
+    if len(storage_dict) > 0:
+        kk = list(storage_dict.keys())
+        if config.predict.load_epoach == -1:
+            config.predict.load_epoach = kk[-1]
+        net.load_state_dict(
+            torch.load(BytesIO(storage_dict[config.predict.load_epoach]), map_location=device), strict=True)
+        logger.info(f'loading from epoach {config.predict.load_epoach}')
+
     net.eval()
-    outputs = []
-    features = []
-    for batch_cnt, batch in tqdm(enumerate(loader), total=len(loader)):
+
+    outputs = {}
+    keys = ['softmax']
+    if config.predict.values_to_save is not None and len(config.predict.values_to_save) > 0:
+        keys = config.predict.values_to_save
+    for k in keys:
+        outputs[k] = []
+    for batch_cnt, batch in tqdm(enumerate(chain(loader, test_loader)), total=len(loader)+len(test_loader)):
         image, label = batch
-        image = image.to(predict_device)
-        net_out, feature = net(image)
-        for k, v in net_out.items():
-            net_out[k] = v.detach().cpu()
-        for k, v in feature.items():
-            feature[k] = v.detach().cpu()
-        outputs.append(net_out)
-        features.append(feature)
-    record = {}
-    feature = {}
-    for k in outputs[0].keys():
-        record[k] = torch.cat([i[k] for i in outputs])
-    for k in features[0].keys():
-        feature[k] = torch.cat([i[k] for i in features])
-    return record, feature
+        image = image.to(device)
+        net_out = net(image)
+        net_out.update(label)
+        out = {}
+        for k in keys:
+            outputs[k].append(net_out[k].detach().cpu())
+    # record = {}
+    for k in keys:
+        outputs[k] = torch.cat(outputs[k])
+    pickle.dump((outputs), open(f'{config.output_dir}/predict.pkl', 'wb'))
 
 
 class LossCalculator():
@@ -282,22 +318,19 @@ def wtire_summary(loss_map, tag='train', step=None):
 
 
 def train(config):
-    n_clsaa = 6
-    Learn_Swaped = False
-
     loader = DataLoader(
         TrainEvalDataset(
             config.dataset(split='train', **config.dataset_parameter),
             config),
-        config.batch_size, True, num_workers=1)
+        config.batch_size, True, num_workers=8)
     test_loader = DataLoader(
         TrainEvalDataset(
             config.dataset(split='test', **config.dataset_parameter),
             config),
-        config.batch_size, False, num_workers=1)
+        config.batch_size, False, num_workers=8)
     net = NetModel(config.net)
     loss_calculator = LossCalculator(config.net.loss)
-    net = nn.DataParallel(net)
+    # net = nn.DataParallel(net)
     logger.info(config.net.pre_train)
     logger.info(type(config.net.pre_train))
     if config.net.pre_train is not None and os.path.exists(config.net.pre_train):
@@ -309,7 +342,7 @@ def train(config):
         logger.info(unused)
         logger.info(unused1)
     net = net.to(device)
-    optimizer = SGD(net.parameters(), 0.0001, 0.9)
+    optimizer = SGD(net.parameters(), config.lr, 0.9, weight_decay=0.0005)
     exp_lr_scheduler = lr_scheduler.ExponentialLR(optimizer, 0.95)
 
     storage_dict = SqliteDict(f'{config.output_dir}/dcl_snap.db')
@@ -364,6 +397,7 @@ class DCLCONFIG(util.bconfig.Config):
         func = util.bconfig.ValueMap(
             'acc',
             acc=metrics_acc, mAP=metrics_AP, mROC=metrics_mRoc,
+            iou=metrics_iou,
         )
 
     class NetDef(util.bconfig.Config):
@@ -377,8 +411,9 @@ class DCLCONFIG(util.bconfig.Config):
                 cross_entropy=nn.CrossEntropyLoss,
                 smooth_l1_loss=nn.SmoothL1Loss,
                 yolo=model.dark_53.YOLOLayer,
+                cross_entropy2d=CrossEntropy2d,
             )
-            loss_parameters=util.bconfig.Value({})
+            loss_parameters = util.bconfig.Value({})
 
         class OutputsDef(util.bconfig.Config):
             layer_parameters = util.bconfig.Value({})
@@ -389,6 +424,7 @@ class DCLCONFIG(util.bconfig.Config):
                 relu=nn.ReLU, conv=nn.Conv2d,
                 yolo=model.dark_53.YOLOLayer,
                 yolo_box=model.dark_53.YOLO2Boxes,
+                dropout=nn.Dropout,
             )
 
         basenet = util.bconfig.ValueMap('resnet', **model.models)
@@ -400,6 +436,10 @@ class DCLCONFIG(util.bconfig.Config):
     class AugmentDef(util.bconfig.Config):
         op = util.bconfig.ValueMap('None', **augment_map)
         parameters = util.bconfig.Value({})
+
+    class PredictDef(util.bconfig.Config):
+        load_epoach = util.bconfig.Value(-1)
+        values_to_save = util.bconfig.ValueList(util.bconfig.Value)
 
     train_transform = util.bconfig.ValueList(AugmentDef)
     test_transform = util.bconfig.ValueList(AugmentDef)
@@ -413,6 +453,8 @@ class DCLCONFIG(util.bconfig.Config):
     cmd = util.bconfig.Value('train')
     config = util.bconfig.Value('configure.yaml')
     max_it = util.bconfig.Value(14)
+    lr = util.bconfig.Value(0.001)
+    predict = PredictDef()
 
 
 def serve():
@@ -433,8 +475,16 @@ if __name__ == "__main__":
     elif cfg.cmd == 'train':
         config = cfg
         config.from_yaml(cfg.config)
+        logger.info(config.dump_yaml())
         config.parse_args()
         summery_writer = SummaryWriter(logdir=f'{config.output_dir}/log')
         with open(f'{config.output_dir}/config.yaml', 'w') as f:
             f.write(config.dump_yaml())
+        logger.info(config.dump_yaml())
         train(config)
+    elif cfg.cmd == 'predict':
+        config = cfg
+        config.from_yaml(cfg.config)
+        config.parse_args()
+        logger.info(config.dump_yaml())
+        predict(config)
