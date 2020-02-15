@@ -1,0 +1,44 @@
+dataset: Mnist
+batch_size: 1000
+# input_size: 32
+max_it: 90
+lr: 0.1
+dataset_parameter: {}
+output_dir: log/mnist_experiment2
+train_transform:
+- op: ToFloat
+  parameters: {}
+- op: ToTensor
+  parameters: {}
+test_transform:
+- op: ToFloat
+  parameters: {}
+- op: ToTensor
+  parameters: {}
+net:
+  pre_train: null
+  basenet: expModel
+  loss:
+  - input: '*'
+    target: '*'
+    loss_type: exp_loss
+    name: exp_loss
+    weight: 1
+  net_parameters: {}
+  outputs: []
+metrics:
+
+  - name: acc_label
+    predicts: y_label
+    ground_truth: label
+    func: acc
+
+  - name: acc_y_
+    predicts: y_
+    ground_truth: label
+    func: acc
+
+predict:
+  values_to_save:
+    - y_
+    - y_label

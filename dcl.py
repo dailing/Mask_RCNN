@@ -29,11 +29,12 @@ import model
 from model.deeplab_v3 import CrossEntropy2d
 import pickle
 from itertools import chain
-
+from model.experiment import ExperimentLoss
+from os import cpu_count
 
 logger = get_logger('fff')
 device = torch.device('cuda')
-
+num_processor = cpu_count()
 
 class NetModel(nn.Module):
     def __init__(self, config, with_feature=False):
@@ -238,12 +239,12 @@ def predict(config):
         TrainEvalDataset(
             config.dataset(split='train', **config.dataset_parameter),
             config),
-        1000, False, num_workers=8)
+        1000, False, num_workers=num_processor)
     test_loader = DataLoader(
         TrainEvalDataset(
             config.dataset(split='test', **config.dataset_parameter),
             config),
-        1000, False, num_workers=8)
+        1000, False, num_workers=num_processor)
     net = NetModel(config.net)
     net = net.to(device)
 
@@ -291,8 +292,11 @@ class LossCalculator():
         loss = {}
         loss_sum = None
         for cfg, loss_ins in zip(self.config, self.loss_instance):
-            assert cfg.input in net_out, f'{cfg.input} not in {list(net_out.keys())}'
-            input = net_out[cfg.input]
+            assert cfg.input == '*' or cfg.input in net_out, f'{cfg.input} not in {list(net_out.keys())}'
+            if cfg.input == '*':
+                input = net_out
+            else:
+                input = net_out[cfg.input]
             if cfg.target == '*':
                 target = label
             else:
@@ -322,12 +326,12 @@ def train(config):
         TrainEvalDataset(
             config.dataset(split='train', **config.dataset_parameter),
             config),
-        config.batch_size, True, num_workers=8)
+        config.batch_size, True, num_workers=num_processor)
     test_loader = DataLoader(
         TrainEvalDataset(
             config.dataset(split='test', **config.dataset_parameter),
             config),
-        config.batch_size, False, num_workers=8)
+        config.batch_size, False, num_workers=num_processor)
     net = NetModel(config.net)
     loss_calculator = LossCalculator(config.net.loss)
     # net = nn.DataParallel(net)
@@ -335,8 +339,8 @@ def train(config):
     logger.info(type(config.net.pre_train))
     if config.net.pre_train is not None and os.path.exists(config.net.pre_train):
         unused, unused1 = net.load_state_dict(
-            {(('module.base_net.'+k) if not
-                k.startswith('module.base_net') else k): v
+            {(('base_net.'+k) if not
+                k.startswith('base_net') else k): v
                 for k, v in torch.load(config.net.pre_train).items()},
             strict=False)
         logger.info(unused)
@@ -412,6 +416,7 @@ class DCLCONFIG(util.bconfig.Config):
                 smooth_l1_loss=nn.SmoothL1Loss,
                 yolo=model.dark_53.YOLOLayer,
                 cross_entropy2d=CrossEntropy2d,
+                exp_loss=ExperimentLoss,
             )
             loss_parameters = util.bconfig.Value({})
 
@@ -420,8 +425,10 @@ class DCLCONFIG(util.bconfig.Config):
             name_input = util.bconfig.Value('feature')
             name_output = util.bconfig.Value('level_ce')
             model = util.bconfig.ValueMap(
-                'fc', fc=nn.Linear, softmax=nn.Softmax,
-                relu=nn.ReLU, conv=nn.Conv2d,
+                'fc', fc=nn.Linear,
+                softmax=nn.Softmax,
+                relu=nn.ReLU,
+                conv=nn.Conv2d,
                 yolo=model.dark_53.YOLOLayer,
                 yolo_box=model.dark_53.YOLO2Boxes,
                 dropout=nn.Dropout,
@@ -475,16 +482,16 @@ if __name__ == "__main__":
     elif cfg.cmd == 'train':
         config = cfg
         config.from_yaml(cfg.config)
-        logger.info(config.dump_yaml())
+        logger.debug(config.dump_yaml())
         config.parse_args()
         summery_writer = SummaryWriter(logdir=f'{config.output_dir}/log')
         with open(f'{config.output_dir}/config.yaml', 'w') as f:
             f.write(config.dump_yaml())
-        logger.info(config.dump_yaml())
+        logger.debug(config.dump_yaml())
         train(config)
     elif cfg.cmd == 'predict':
         config = cfg
         config.from_yaml(cfg.config)
         config.parse_args()
-        logger.info(config.dump_yaml())
+        logger.debug(config.dump_yaml())
         predict(config)
