@@ -303,12 +303,12 @@ class InceptionV4(nn.Module):
         x = F.avg_pool2d(features, kernel_size=adaptiveAvgPoolWidth)
         x = x.view(x.size(0), -1)
         # x = self.last_linear(x)
-        return dict(feature=x)
+        return x
 
     def forward(self, input):
         x = self.features(input)
         x = self.logits(x)
-        return x
+        return dict(feature=x)
 
 
 def inceptionv4(num_classes=1000, pretrained='imagenet'):

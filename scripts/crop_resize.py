@@ -39,14 +39,14 @@ def crop_image(size, output_dir, data_dir):
     images = []
     for dirpath, dirnames, filenames in walk(data_dir):
         for f in filenames:
-            if f.split('.')[-1].lower() in ['jpg', 'jpeg', 'png', 'tiff']:
+            if '.' not in f or f.split('.')[-1].lower() in ['jpg', 'jpeg', 'png', 'tiff']:
                 pp = pjoin(dirpath, f)
                 assert pp.startswith(data_dir)
                 pp = pp[len(data_dir) + 1:]
                 images.append((pjoin(data_dir, pp), pjoin(output_dir, pp), size) )
     pool = Pool(processes=cpu_count())
 
-    out = pool.map_async(walker, images)
+    out = pool.map_async(walker, images, chunksize=5 * cpu_count())
     out.wait()
     for res, (in_img, _) in zip(out.get(), images):
         if not res:

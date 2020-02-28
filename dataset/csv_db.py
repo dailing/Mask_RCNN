@@ -11,6 +11,8 @@ class CsvDataset():
         self.reader = None
         if split is None:
             split = 'train'
+        if root is None:
+            raise Exception("FUCK NO ROOT GIVEN")
         self.root = root
         self.split = split
         label_file =  pjoin(root, f'{split}.csv')
@@ -20,15 +22,19 @@ class CsvDataset():
     def __getitem__(self, index):
         if index >= self.length:
             raise IndexError
-        row = self.files.iloc[index]
-        fname = pjoin(self.root, row.image)
-        file_content = open(fname, 'rb').read()
-        if file_content is None:
-            raise Exception(f'file {fname} not found')
-        img = cv2.imdecode(
-            np.frombuffer(file_content, np.uint8),
-            cv2.IMREAD_COLOR)
-        if img is None:
+        try:
+            row = self.files.iloc[index]
+            fname = pjoin(self.root, row.image)
+            file_content = open(fname, 'rb').read()
+            if file_content is None:
+                raise Exception(f'file "{fname}" not found')
+            img = cv2.imdecode(
+                np.frombuffer(file_content, np.uint8),
+                cv2.IMREAD_COLOR)
+            if img is None:
+                raise Exception(f'Cannot read image {fname}')
+        except Exception as e:
+            print('##################', e)
             return self.__getitem__(randint(0, self.length-1))        
         return img, row.to_dict()
 
