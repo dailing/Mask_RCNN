@@ -1,11 +1,12 @@
 import torch.nn as nn
-
+from . import MODEL_REGISTRY
 
 # model_urls = {
 #     'alexnet': 'https://download.pytorch.org/models/alexnet-owt-4df8aa71.pth',
 # }
 
 
+@MODEL_REGISTRY.register()
 class LeNet(nn.Module):
 
     def __init__(self, num_classes=1000):
@@ -25,18 +26,3 @@ class LeNet(nn.Module):
 
         return dict(feature=x)
 
-
-# def alexnet(pretrained=False, progress=True, **kwargs):
-#     r"""AlexNet model architecture from the
-#     `"One weird trick..." <https://arxiv.org/abs/1404.5997>`_ paper.
-
-#     Args:
-#         pretrained (bool): If True, returns a model pre-trained on ImageNet
-#         progress (bool): If True, displays a progress bar of the download to stderr
-#     """
-#     model = AlexNet(**kwargs)
-#     if pretrained:
-#         state_dict = load_state_dict_from_url(model_urls['alexnet'],
-#                                               progress=progress)
-#         model.load_state_dict(state_dict)
-#     return model

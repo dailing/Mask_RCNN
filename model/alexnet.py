@@ -1,11 +1,12 @@
 import torch.nn as nn
+from . import MODEL_REGISTRY
 
 
 # model_urls = {
 #     'alexnet': 'https://download.pytorch.org/models/alexnet-owt-4df8aa71.pth',
 # }
 
-
+@MODEL_REGISTRY.register()
 class AlexNet(nn.Module):
 
     def __init__(self, num_classes=1000):

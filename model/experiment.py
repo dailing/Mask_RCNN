@@ -5,12 +5,16 @@ from torch.nn import Parameter
 import torch.nn.init as init
 import math
 from util.logs import get_logger
-from model import InceptionV4, ResNet18, ResNet101
+from .inceptionv4 import InceptionV4
+from .resnet import ResNet18, ResNet101
 from torchvision.models.utils import load_state_dict_from_url
+from . import MODEL_REGISTRY
+
 
 logger = get_logger('experiment')
 
 
+@MODEL_REGISTRY.register()
 class ExperimentModel(nn.Module):
 
     def __init__(self, num_classes=10):
@@ -62,6 +66,7 @@ class ExperimentModel(nn.Module):
         return dict(feature=x, quality=quality,clear=clear,artifact=artifact,position=position)
 
 
+@MODEL_REGISTRY.register()
 class ExperimentLoss(nn.Module):
     def __init__(self):
         super(ExperimentLoss, self).__init__()

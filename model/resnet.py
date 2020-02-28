@@ -1,6 +1,6 @@
 import torch.nn as nn
 from torchvision.models.utils import load_state_dict_from_url
-
+from . import MODEL_REGISTRY
 
 __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
            'resnet152', 'resnext50_32x4d', 'resnext101_32x8d']
@@ -229,11 +229,13 @@ class BaseResnet(ResNet):
         return dict(feature=x, feature_map=fmap)
 
 
+@MODEL_REGISTRY.register()
 class ResNet50(BaseResnet):
     def __init__(self):
         super().__init__(Bottleneck, [3, 4, 6, 3])
 
 
+@MODEL_REGISTRY.register()
 class ResNet101(BaseResnet):
     def __init__(self, pretrained=False):
         super().__init__(Bottleneck, [3, 4, 23, 3])
@@ -246,6 +248,7 @@ class ResNet101(BaseResnet):
             print(unused)
 
 
+@MODEL_REGISTRY.register()
 class ResNet18(BaseResnet):
     def __init__(self, pretrained=False):
         super().__init__(BasicBlock, [2, 2, 2, 2])

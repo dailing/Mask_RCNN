@@ -6,6 +6,8 @@ import torch.utils.model_zoo as model_zoo
 import os
 import sys
 
+from . import MODEL_REGISTRY
+
 __all__ = ['InceptionV4', 'inceptionv4']
 
 pretrained_settings = {
@@ -260,7 +262,7 @@ class Inception_C(nn.Module):
         out = torch.cat((x0, x1, x2, x3), 1)
         return out
 
-
+@MODEL_REGISTRY.register()
 class InceptionV4(nn.Module):
 
     def __init__(self, num_classes=1001, input_channel=3):

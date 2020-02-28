@@ -8,6 +8,7 @@ import queue
 import collections
 import threading
 from torch.utils import model_zoo
+from . import MODEL_REGISTRY
 
 class CrossEntropy2d():
     def __init__(self, weight=None, size_average=True):
@@ -573,6 +574,7 @@ def build_backbone(backbone, output_stride, BatchNorm):
         raise NotImplementedError
 
 
+@MODEL_REGISTRY.register()
 class DeepLab(nn.Module):
     def __init__(self, backbone='resnet', output_stride=16, num_classes=1,
                  sync_bn=True, freeze_bn=False):

@@ -2,6 +2,8 @@ from torchvision.models.detection import MaskRCNN as MaskRCNN_
 from torchvision.models.utils import load_state_dict_from_url
 from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
 from torchvision.models.detection.rpn import AnchorGenerator
+from . import MODEL_REGISTRY
+
 
 model_urls = {
     'maskrcnn_resnet50_fpn_coco':
@@ -9,6 +11,7 @@ model_urls = {
 }
 
 
+@MODEL_REGISTRY.register()
 class MaskRCNN(MaskRCNN_):
     def __init__(self, num_class=10):
         backbone = resnet_fpn_backbone('resnet50', False)

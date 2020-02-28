@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from util.logs import get_logger
 import numpy as np
-
+from . import MODEL_REGISTRY
 
 logger = get_logger('dark loss')
 
@@ -31,7 +31,7 @@ class DarkResidualBlock(nn.Module):
         out += residual
         return out
 
-
+@MODEL_REGISTRY.register()
 class Darknet53(nn.Module):
     def __init__(self, block=DarkResidualBlock, num_classes=1000):
         super(Darknet53, self).__init__()

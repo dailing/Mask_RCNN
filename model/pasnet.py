@@ -4,6 +4,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
+from . import MODEL_REGISTRY
 
 
 pretrained_settings = {
@@ -288,6 +289,7 @@ class Cell(CellBase):
         return x_out
 
 
+@MODEL_REGISTRY.register()
 class PNASNet5Large(nn.Module):
     def __init__(self, num_classes=1001):
         super(PNASNet5Large, self).__init__()
