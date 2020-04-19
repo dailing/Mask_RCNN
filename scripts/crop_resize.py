@@ -48,7 +48,7 @@ def crop_image(size, output_dir, data_dir):
 
     out = pool.map_async(walker, images, chunksize=5 * cpu_count())
     out.wait()
-    for res, (in_img, _) in zip(out.get(), images):
+    for res, (in_img, _, _) in zip(out.get(), images):
         if not res:
             print(f"FUCK {in_img}!!!")
 

@@ -5,10 +5,11 @@ import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 import os
 import sys
-
+from util.logs import get_logger
 from . import MODEL_REGISTRY
 
 __all__ = ['InceptionV4', 'inceptionv4']
+logger = get_logger('inception')
 
 pretrained_settings = {
     'inceptionv4': {
@@ -262,30 +263,75 @@ class Inception_C(nn.Module):
         out = torch.cat((x0, x1, x2, x3), 1)
         return out
 
+
+# class ProjectorBlock(nn.Module):
+
+#     def __init__(self, in_features, out_features):
+#         super(ProjectorBlock, self).__init__()
+#         self.op = nn.Conv2d(in_channels=in_features, out_channels=out_features, kernel_size=1, padding=0, bias=False)
+
+#     def forward(self, inputs):
+#         return self.op(inputs)
+
+
+class LinearAttentionBlock(nn.Module):
+
+    def __init__(self, in_features, normalize_attn=True, out_features = 512):
+        super(LinearAttentionBlock, self).__init__()
+        self.normalize_attn = normalize_attn
+        self.op = nn.Conv2d(in_channels=in_features, out_channels=1, kernel_size=1, padding=0, bias=False)
+        self.project = nn.Linear(in_features, out_features)
+
+    def forward(self, l, g=None):
+        N, C, W, H = l.size()
+        if g is None:
+            c = self.op(l)
+        else:
+            c = self.op(l+g) # batch_sizex1xWxH
+        if self.normalize_attn:
+            a = F.softmax(c.view(N,1,-1), dim=2).view(N,1,W,H)
+        else:
+            a = torch.sigmoid(c)
+        g = torch.mul(a.expand_as(l), l)
+        if self.normalize_attn:
+            g = g.view(N,C,-1).sum(dim=2) # batch_sizexC
+        else:
+            g = F.adaptive_avg_pool2d(g, (1,1)).view(N,C)
+        g = self.project(g)
+        return c.view(N,1,W,H), g
+
+
 @MODEL_REGISTRY.register()
 class InceptionV4(nn.Module):
 
-    def __init__(self, num_classes=1001, input_channel=3):
+    def __init__(self, num_classes=1001, input_channel=3, attention=True):
         super(InceptionV4, self).__init__()
         # Special attributs
         self.input_space = None
         self.input_size = (299, 299, 3)
         self.mean = None
         self.std = None
+        self.attention = attention
         # Modules
-        self.features = nn.Sequential(
+        self.feature1 = nn.Sequential(
             BasicConv2d(input_channel, 32, kernel_size=3, stride=2),
             BasicConv2d(32, 32, kernel_size=3, stride=1),
             BasicConv2d(32, 64, kernel_size=3, stride=1, padding=1),
             Mixed_3a(),
             Mixed_4a(),
-            Mixed_5a(),
+            Mixed_5a(), #5
+            nn.Dropout(0.2),
+        )
+        self.feature2 = nn.Sequential(
             Inception_A(),
             Inception_A(),
             Inception_A(),
             Inception_A(),
-            Reduction_A(), # Mixed_6a
-            Inception_B(),
+            Reduction_A(), # Mixed_6a 10
+            nn.Dropout(0.2),
+        )
+        self.feature3 = nn.Sequential(
+            Inception_B(), # 11
             Inception_B(),
             Inception_B(),
             Inception_B(),
@@ -295,9 +341,13 @@ class InceptionV4(nn.Module):
             Reduction_B(), # Mixed_7a
             Inception_C(),
             Inception_C(),
-            Inception_C()
+            Inception_C(),
+            nn.Dropout(0.2),
         )
-        # self.last_linear = nn.Linear(1536, num_classes)
+        if self.attention:
+            self.attn1 = LinearAttentionBlock(384)
+            self.attn2 = LinearAttentionBlock(1024)
+            self.attn3 = LinearAttentionBlock(1536)
 
     def logits(self, features):
         # Allows image of any size to be processed
@@ -308,35 +358,47 @@ class InceptionV4(nn.Module):
         return x
 
     def forward(self, input):
-        x = self.features(input)
-        x = self.logits(x)
-        return dict(feature=x)
+        f1 = self.feature1(input)
+        f2 = self.feature2(f1)
+        f3 = self.feature3(f2)
+        # logger.info(f1.shape)
+        # logger.info(f2.shape)
+        # logger.info(f3.shape)
+        if self.attention:
+            c1, g1 = self.attn1(f1)
+            c2, g2 = self.attn2(f2)
+            c3, g3 = self.attn3(f3)
+            gg = torch.cat((g1, g2, g3), dim=1)
+            # logger.info(gg.shape)
+        else:
+            gg = self.logits(f3)
+        return dict(feature=gg)
 
 
-def inceptionv4(num_classes=1000, pretrained='imagenet'):
-    if pretrained:
-        settings = pretrained_settings['inceptionv4'][pretrained]
-        assert num_classes == settings['num_classes'], \
-            "num_classes should be {}, but is {}".format(settings['num_classes'], num_classes)
+# def inceptionv4(num_classes=1000, pretrained='imagenet'):
+#     if pretrained:
+#         settings = pretrained_settings['inceptionv4'][pretrained]
+#         assert num_classes == settings['num_classes'], \
+#             "num_classes should be {}, but is {}".format(settings['num_classes'], num_classes)
 
-        # both 'imagenet'&'imagenet+background' are loaded from same parameters
-        model = InceptionV4(num_classes=1001)
-        model.load_state_dict(model_zoo.load_url(settings['url']))
+#         # both 'imagenet'&'imagenet+background' are loaded from same parameters
+#         model = InceptionV4(num_classes=1001)
+#         model.load_state_dict(model_zoo.load_url(settings['url']))
 
-        if pretrained == 'imagenet':
-            new_last_linear = nn.Linear(1536, 1000)
-            new_last_linear.weight.data = model.last_linear.weight.data[1:]
-            new_last_linear.bias.data = model.last_linear.bias.data[1:]
-            model.last_linear = new_last_linear
+#         if pretrained == 'imagenet':
+#             new_last_linear = nn.Linear(1536, 1000)
+#             new_last_linear.weight.data = model.last_linear.weight.data[1:]
+#             new_last_linear.bias.data = model.last_linear.bias.data[1:]
+#             model.last_linear = new_last_linear
 
-        model.input_space = settings['input_space']
-        model.input_size = settings['input_size']
-        model.input_range = settings['input_range']
-        model.mean = settings['mean']
-        model.std = settings['std']
-    else:
-        model = InceptionV4(num_classes=num_classes)
-    return model
+#         model.input_space = settings['input_space']
+#         model.input_size = settings['input_size']
+#         model.input_range = settings['input_range']
+#         model.mean = settings['mean']
+#         model.std = settings['std']
+#     else:
+#         model = InceptionV4(num_classes=num_classes)
+#     return model
 
 
 '''

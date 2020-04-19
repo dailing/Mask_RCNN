@@ -163,6 +163,53 @@ def metrics_iou(output, label):
             iou[f'{i}'] = intersection / union
     return iou
 
+from sklearn.metrics import confusion_matrix
+
+def quadratic_kappa(output, actuals, N=5):
+    N = output.shape[1]
+    # logger.info(output.shape)
+    if N == 1:
+        preds = output
+        preds *= 5
+        preds = np.round(output).squeeze().astype(np.int)
+        preds[preds<0] = 0
+        preds[preds>=4] = 4
+        N=5
+    else:
+        preds = np.argmax(output, axis=1)
+    # logger.info(preds.shape)
+    # logger.info(preds)
+    """This function calculates the Quadratic Kappa Metric used for Evaluation in the PetFinder competition
+    at Kaggle. It returns the Quadratic Weighted Kappa metric score between the actual and the predicted values 
+    of adoption rating."""
+    w = np.zeros((N,N))
+    O = confusion_matrix(actuals, preds)
+    for i in range(len(w)): 
+        for j in range(len(w)):
+            w[i][j] = float(((i-j)**2)/(N-1)**2)
+    
+    act_hist=np.zeros([N])
+    for item in actuals: 
+        item = int(item)
+        act_hist[item]+=1
+    
+    pred_hist=np.zeros([N])
+    for item in preds: 
+        item = int(item)
+        pred_hist[item]+=1
+                         
+    E = np.outer(act_hist, pred_hist)
+    E = E/E.sum()
+    O = O/O.sum()
+    print(O.shape)
+    num=0
+    den=0
+    for i in range(len(w)):
+        for j in range(len(w)):
+            num+=w[i][j]*O[i][j]
+            den+=w[i][j]*E[i][j]
+    return (1 - (num/den))
+
 
 def metrics_mRoc(output, label):
     n_class = output.shape[1]
@@ -181,7 +228,11 @@ def calculate_metrics(config, output_all, label_all):
     for metric in config:
         output = np.array(output_all[metric.predicts])
         label = np.array(label_all[metric.ground_truth])
-        result[metric.name] = metric.func(output, label)
+        try:
+            result[metric.name] = metric.func(output, label)
+        except Exception as e:
+            result[metric.name] = -1
+            logger.error(e)
     # result['mapping'] = calculate_mapping(output_all, label_all)
     return result
 
@@ -301,6 +352,10 @@ class LossCalculator():
                 target = label
             else:
                 target = label[cfg.target]
+            if cfg.loss_type is nn.SmoothL1Loss:
+                target = target.to(torch.float32) / 5
+                target = target.unsqueeze(dim=1)
+                # logger.info(target)
             loss_val = loss_ins(input, target)
             loss_val *= cfg.weight
             assert cfg.name not in loss
@@ -347,7 +402,8 @@ def train(config):
         logger.info(unused1)
     net = net.to(device)
     optimizer = SGD(net.parameters(), config.lr, 0.9, weight_decay=0.0005)
-    exp_lr_scheduler = lr_scheduler.ExponentialLR(optimizer, 0.95)
+    # optimizer = Adam(net.parameters(), config.lr, weight_decay=0.0005)
+    exp_lr_scheduler = lr_scheduler.ExponentialLR(optimizer, 0.30)
 
     storage_dict = SqliteDict(f'{config.output_dir}/dcl_snap.db')
     start_epoach = 0
@@ -401,7 +457,7 @@ class DCLCONFIG(util.bconfig.Config):
         func = util.bconfig.ValueMap(
             'acc',
             acc=metrics_acc, mAP=metrics_AP, mROC=metrics_mRoc,
-            iou=metrics_iou,
+            iou=metrics_iou, wkappa=quadratic_kappa,
         )
 
     class NetDef(util.bconfig.Config):
@@ -436,7 +492,7 @@ class DCLCONFIG(util.bconfig.Config):
 
         basenet = util.bconfig.ValueMap('resnet', **model.models)
         net_parameters = util.bconfig.Value(dict(num_classes=6))
-        pre_train = util.bconfig.Value('runs/resnet50-19c8e357.pth')
+        pre_train = util.bconfig.Value("")
         outputs = util.bconfig.ValueList(OutputsDef)
         loss = util.bconfig.ValueList(LossDef)
 

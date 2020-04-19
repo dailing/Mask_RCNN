@@ -29,3 +29,4 @@ from . import dark_53
 from . import deeplab_v3 
 from . import experiment 
 from . import maskrcnn 
+from . import attention

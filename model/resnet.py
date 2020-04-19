@@ -248,6 +248,21 @@ class ResNet101(BaseResnet):
             print(unused)
 
 
+# ('resnet152', Bottleneck, [3, 8, 36, 3], pretrained, progress,
+#                **kwargs)
+@MODEL_REGISTRY.register()
+class ResNet152(BaseResnet):
+    def __init__(self, pretrained=False):
+        super().__init__(Bottleneck, [3, 8, 36, 3], groups=32, width_per_group=8)
+        if pretrained:
+            state_dict = load_state_dict_from_url(
+                model_urls['resnet152'],
+                model_dir='asserts',
+                progress=True)
+            unused = self.load_state_dict(state_dict, strict=False)
+            print(unused)
+
+
 @MODEL_REGISTRY.register()
 class ResNet18(BaseResnet):
     def __init__(self, pretrained=False):
